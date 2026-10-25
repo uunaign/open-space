@@ -71,6 +71,11 @@
   background: transparent;
 }
 
+.canvas-item.folder-item.selected {
+  border: none;
+  box-shadow: none;
+}
+
 .canvas-item.selected {
   border-color: rgba(17, 24, 39, 0.2);
   box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.08), var(--shadow-soft);
@@ -296,11 +301,8 @@ iframe {
   position: relative;
   width: 100%;
   height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.74);
-  overflow: hidden;
+  background: transparent;
+  overflow: visible;
 }
 
 .folder-layer {
@@ -311,119 +313,96 @@ iframe {
   pointer-events: none;
 }
 
-.folder-layer svg {
+.folder-layer img {
   width: 100%;
   height: 100%;
   display: block;
+  object-fit: fill;
 }
 
 .folder-layer-back {
-  transform: translate(-8px, 10px) scale(0.98);
-  opacity: 0.9;
+  z-index: 0;
 }
 
 .folder-layer-front {
-  transform: translate(0, 0);
-}
-
-.folder-content,
-.folder-compact-papers {
-  position: relative;
   z-index: 2;
-  width: 100%;
-  height: 100%;
+  transform: translate(0, 0);
 }
 
 .folder-compact-papers {
   position: absolute;
   inset: 0;
-}
-
-.folder-empty-state {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  font-size: 0.62rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: rgba(17, 24, 39, 0.45);
-}
-
-.folder-paper-wrapper {
-  position: absolute;
-  left: 42px;
-  top: 34px;
-  width: 90px;
-  height: 62px;
-  z-index: 3;
-}
-
-.folder-paper {
-  display: flex;
-  flex-direction: column;
   width: 100%;
   height: 100%;
-  padding: 8px 8px 7px;
-  border: 1px solid rgba(17, 24, 39, 0.08);
-  border-radius: 7px;
-  background: linear-gradient(180deg, #ffffff, #f8fafc);
-  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.05);
-  overflow: hidden;
-}
-
-.folder-paper-label {
-  display: inline-block;
-  font-size: 0.46rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: rgba(17, 24, 39, 0.6);
-  margin-bottom: 4px;
-}
-
-.folder-paper strong,
-.folder-paper small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.folder-paper strong {
-  font-size: 0.56rem;
-  line-height: 1.2;
-  color: var(--canvas-text);
-  margin-bottom: 4px;
-}
-
-.folder-paper small {
-  font-size: 0.46rem;
-  color: rgba(17, 24, 39, 0.6);
+  z-index: 3;
+  pointer-events: none;
 }
 
 .folder-compact-paper {
   position: absolute;
-  left: 40px;
-  top: 32px;
-  width: 64px;
-  height: 44px;
+  left: 50%;
+  top: 25%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  width: 128px;
+  height: 76px;
+  padding: 8px;
+  overflow: hidden;
   border: 1px solid rgba(17, 24, 39, 0.08);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 6px 12px rgba(15, 23, 42, 0.04);
 }
 
-.folder-compact-paper span {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.42rem;
+.folder-compact-paper strong,
+.folder-compact-paper small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-compact-paper strong {
+  font-size: 0.56rem;
   font-weight: 600;
   color: rgba(17, 24, 39, 0.5);
+}
+
+.folder-compact-paper small {
+  margin-top: 4px;
+  font-size: 0.46rem;
+  color: rgba(17, 24, 39, 0.45);
+}
+
+.folder-compact-paper img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.folder-expanded-child {
+  overflow: hidden;
+  border-radius: 4px;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.16);
+}
+
+.folder-expanded-child .canvas-item-body {
+  overflow: hidden;
+  background: #fff;
+  pointer-events: none;
+}
+
+.folder-expanded-child .canvas-note-preview {
+  min-height: 0;
+  height: 100%;
+  padding: 8px;
+  overflow: hidden;
+  font-size: 0.58rem;
+  line-height: 1.35;
+}
+
+.folder-expanded-child .canvas-resize-handle {
+  display: none;
 }
 
 .container-summary {
