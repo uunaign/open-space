@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import folderFrontImage from '../assets/Carpeta_delantera.svg';
 import folderBackImage from '../assets/Carpeta_trasera.svg';
 import './Canvas.css';
@@ -106,6 +107,9 @@ interface FileCanvasItem extends BaseCanvasItem {
 interface PageCanvasItem extends BaseCanvasItem {
   type: 'page';
   url: string;
+  captureUrl?: string;
+  scale: number;
+  visibleHeight: number;
 }
 
 interface GroupCanvasItem extends BaseCanvasItem {
@@ -125,6 +129,7 @@ type CanvasItem = NoteCanvasItem | FileCanvasItem | PageCanvasItem | GroupCanvas
 interface DragInteraction {
   kind: 'pan' | 'move' | 'resize';
   id?: string;
+  resizeMode?: 'scale' | 'viewport';
   startX: number;
   startY: number;
   startPanX: number;
@@ -135,6 +140,8 @@ interface DragInteraction {
   originY?: number;
   originWidth?: number;
   originHeight?: number;
+  originScale?: number;
+  originViewportHeight?: number;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
@@ -298,9 +305,93 @@ export const Canvas = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [pageDrafts, setPageDrafts] = useState<Record<string, string>>({});
+  const [pageLoadingIds, setPageLoadingIds] = useState<Record<string, boolean>>({});
+  const [canvasSettingsOpen, setCanvasSettingsOpen] = useState(false);
+  const [fileSettingsOpen, setFileSettingsOpen] = useState(false);
+  const [canvasBackground, setCanvasBackground] = useState('#ffffff');
+  const [canvasGridEnabled, setCanvasGridEnabled] = useState(false);
   const dragStartRef = useRef<DragInteraction | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const panRef = useRef(pan);
+  const zoomRef = useRef(zoom);
+  const centerAnimationRef = useRef<number | null>(null);
   const hasMovedItemRef = useRef(false);
+
+  const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('No se pudo leer el archivo'));
+    reader.readAsDataURL(file);
+  });
+
+  const saveCanvasProject = () => {
+    const snapshot = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      pan,
+      zoom,
+      canvasBackground,
+      canvasGridEnabled,
+      items,
+    };
+
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `open-space-${Date.now()}.osp`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const loadCanvasProject = async (file: File) => {
+    try {
+      const text = await file.text();
+      const snapshot = JSON.parse(text) as {
+        pan?: PanState;
+        zoom?: number;
+        canvasBackground?: string;
+        canvasGridEnabled?: boolean;
+        items?: CanvasItem[];
+      };
+
+      if (snapshot.items && Array.isArray(snapshot.items)) {
+        setItems(snapshot.items);
+      }
+
+      if (snapshot.pan) {
+        setPan(snapshot.pan);
+      }
+
+      if (snapshot.zoom) {
+        setZoom(snapshot.zoom);
+      }
+
+      if (snapshot.canvasBackground) {
+        setCanvasBackground(snapshot.canvasBackground);
+      }
+
+      if (typeof snapshot.canvasGridEnabled === 'boolean') {
+        setCanvasGridEnabled(snapshot.canvasGridEnabled);
+      }
+
+      updateSelection([]);
+    } catch (error) {
+      console.warn('No se pudo abrir el proyecto guardado:', error);
+    }
+  };
+
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -335,15 +426,18 @@ export const Canvas = () => {
     };
 
     const openPageImport = () => {
+      const center = getViewportCenterPosition(520, DEFAULT_PAGE_HEIGHT);
       const newItem: PageCanvasItem = {
         id: makeId(),
         type: 'page',
-        x: 320,
-        y: 220,
+        x: center.x,
+        y: center.y,
         width: 520,
         height: DEFAULT_PAGE_HEIGHT,
         title: 'Página web',
         url: '',
+        scale: 1,
+        visibleHeight: DEFAULT_PAGE_HEIGHT,
       };
 
       setItems((current) => [...current, newItem]);
@@ -353,11 +447,12 @@ export const Canvas = () => {
     };
 
     const createNote = () => {
+      const center = getViewportCenterPosition(220, 150);
       const newItem: NoteCanvasItem = {
         id: makeId(),
         type: 'note',
-        x: 260 + items.length * 20,
-        y: 180 + items.length * 20,
+        x: center.x,
+        y: center.y,
         width: 220,
         height: 150,
         title: 'Nota',
@@ -377,6 +472,75 @@ export const Canvas = () => {
       createFolder();
     };
 
+    const openFileSettings = () => {
+      setFileSettingsOpen(true);
+    };
+
+    const openCanvasSettings = () => {
+      setCanvasSettingsOpen(true);
+    };
+
+    const openProjectImport = () => {
+      projectInputRef.current?.click();
+    };
+
+    const centerView = () => {
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        return;
+      }
+
+      const allVisibleItems = items.filter(
+        (item) => item.type !== 'group' && !items.some((entry) => entry.type === 'folder' && !entry.expanded && entry.childIds.includes(item.id)),
+      );
+
+      if (allVisibleItems.length === 0) {
+        return;
+      }
+
+      const bounds = allVisibleItems.reduce(
+        (acc, item) => ({
+          minX: Math.min(acc.minX, item.x),
+          minY: Math.min(acc.minY, item.y),
+          maxX: Math.max(acc.maxX, item.x + item.width),
+          maxY: Math.max(acc.maxY, item.y + item.height),
+        }),
+        { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: Number.NEGATIVE_INFINITY, maxY: Number.NEGATIVE_INFINITY },
+      );
+
+      const shellRect = viewport.getBoundingClientRect();
+      const centerX = (bounds.minX + bounds.maxX) / 2;
+      const centerY = (bounds.minY + bounds.maxY) / 2;
+      const nextPanX = shellRect.width / 2 - centerX * zoomRef.current;
+      const nextPanY = shellRect.height / 2 - centerY * zoomRef.current;
+      const startX = panRef.current.x;
+      const startY = panRef.current.y;
+      const startTime = performance.now();
+      const duration = 650;
+
+      const tick = (time: number) => {
+        const progress = Math.min((time - startTime) / duration, 1);
+        const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+        const x = startX + (nextPanX - startX) * eased;
+        const y = startY + (nextPanY - startY) * eased;
+
+        panRef.current = { x, y };
+        setPan({ x, y });
+
+        if (progress < 1) {
+          centerAnimationRef.current = requestAnimationFrame(tick);
+        } else {
+          centerAnimationRef.current = null;
+        }
+      };
+
+      if (centerAnimationRef.current !== null) {
+        cancelAnimationFrame(centerAnimationRef.current);
+      }
+
+      centerAnimationRef.current = requestAnimationFrame(tick);
+    };
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('canvas-open-file-import', openFileImport);
@@ -384,8 +548,17 @@ export const Canvas = () => {
     window.addEventListener('canvas-create-note', createNote);
     window.addEventListener('canvas-group-selected', groupSelected);
     window.addEventListener('canvas-create-folder', createContainer);
+    window.addEventListener('canvas-center-view', centerView);
+    window.addEventListener('canvas-open-file-settings', openFileSettings);
+    window.addEventListener('canvas-open-canvas-settings', openCanvasSettings);
+    window.addEventListener('canvas-open-project', openProjectImport);
+    window.addEventListener('canvas-save', saveCanvasProject);
 
     return () => {
+      if (centerAnimationRef.current !== null) {
+        cancelAnimationFrame(centerAnimationRef.current);
+      }
+
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('canvas-open-file-import', openFileImport);
@@ -393,8 +566,29 @@ export const Canvas = () => {
       window.removeEventListener('canvas-create-note', createNote);
       window.removeEventListener('canvas-group-selected', groupSelected);
       window.removeEventListener('canvas-create-folder', createContainer);
+      window.removeEventListener('canvas-center-view', centerView);
+      window.removeEventListener('canvas-open-file-settings', openFileSettings);
+      window.removeEventListener('canvas-open-canvas-settings', openCanvasSettings);
+      window.removeEventListener('canvas-open-project', openProjectImport);
+      window.removeEventListener('canvas-save', saveCanvasProject);
     };
-  }, [items.length, selectedId, selectedIds]);
+  }, [canvasBackground, canvasGridEnabled, items, pan, selectedId, selectedIds, zoom]);
+
+  const getViewportCenterPosition = (width: number, height: number) => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      return { x: 0, y: 0 };
+    }
+
+    const rect = viewport.getBoundingClientRect();
+    const worldX = (rect.width / 2 - pan.x) / zoom;
+    const worldY = (rect.height / 2 - pan.y) / zoom;
+
+    return {
+      x: worldX - width / 2,
+      y: worldY - height / 2,
+    };
+  };
 
   const updateSelection = (nextIds: string[]) => {
     setSelectedIds(nextIds);
@@ -439,13 +633,14 @@ export const Canvas = () => {
   };
 
   const createFolder = () => {
+    const center = getViewportCenterPosition(320 * 0.8, 280 * 0.8);
     const newItem: FolderCanvasItem = {
       id: makeId(),
       type: 'folder',
-      x: 280,
-      y: 170,
-      width: 320,
-      height: 280,
+      x: center.x,
+      y: center.y,
+      width: 320 * 0.8,
+      height: 280 * 0.8,
       title: 'Carpeta',
       childIds: [],
       expanded: false,
@@ -606,19 +801,22 @@ export const Canvas = () => {
     const selectedFiles = Array.from(event.target.files ?? []);
 
     for (const file of selectedFiles) {
-      const objectUrl = URL.createObjectURL(file);
+      const previewUrl = await readFileAsDataUrl(file);
+      const itemWidth = file.type.startsWith('image/') ? 300 : file.type === 'application/pdf' ? 340 : 260;
+      const itemHeight = file.type.startsWith('image/') ? 200 : file.type === 'application/pdf' ? 420 : 170;
+      const center = getViewportCenterPosition(itemWidth, itemHeight);
 
       const newItem: FileCanvasItem = {
         id: makeId(),
         type: 'file',
-        x: 240 + Math.random() * 260,
-        y: 220 + Math.random() * 180,
-        width: file.type.startsWith('image/') ? 300 : file.type === 'application/pdf' ? 340 : 260,
-        height: file.type.startsWith('image/') ? 200 : file.type === 'application/pdf' ? 420 : 170,
+        x: center.x,
+        y: center.y,
+        width: itemWidth,
+        height: itemHeight,
         title: file.name,
         mimeType: file.type || 'application/octet-stream',
         fileName: file.name,
-        previewUrl: objectUrl,
+        previewUrl,
         sizeLabel: `${Math.max(1, Math.round(file.size / 1024))} KB`,
       };
 
@@ -631,6 +829,16 @@ export const Canvas = () => {
       updateSelection([newItem.id]);
     }
 
+    event.target.value = '';
+  };
+
+  const handleProjectImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    await loadCanvasProject(file);
     event.target.value = '';
   };
 
@@ -732,6 +940,37 @@ export const Canvas = () => {
     setIsDragging(true);
   };
 
+  const startPageResize = (event: React.MouseEvent<HTMLDivElement>, id: string, resizeMode: 'scale' | 'viewport') => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    updateSelection([id]);
+    setEditingId(null);
+
+    const item = items.find((entry): entry is PageCanvasItem => entry.id === id && entry.type === 'page');
+    if (!item) {
+      return;
+    }
+
+    dragStartRef.current = {
+      kind: 'resize',
+      id,
+      resizeMode,
+      startX: event.clientX,
+      startY: event.clientY,
+      startPanX: pan.x,
+      startPanY: pan.y,
+      originWidth: item.width,
+      originHeight: item.height,
+      originScale: item.scale,
+      originViewportHeight: item.visibleHeight,
+    };
+    setIsDragging(true);
+  };
+
   const handleMouseMove = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!dragStartRef.current) {
       return;
@@ -792,6 +1031,45 @@ export const Canvas = () => {
     }
 
     if (dragStartRef.current.kind === 'resize') {
+      const draggedItem = items.find((item) => item.id === dragStartRef.current?.id);
+
+      if (draggedItem?.type === 'page') {
+        if (dragStartRef.current.resizeMode === 'scale') {
+          const baseWidth = dragStartRef.current.originWidth ?? draggedItem.width;
+          const baseScale = dragStartRef.current.originScale ?? draggedItem.scale;
+          const nextWidth = clamp(baseWidth + dx / zoom, 220, 980);
+          const nextScale = clamp(baseScale + (dx / zoom) / 180, 0.7, 2.6);
+
+          updateItem(dragStartRef.current.id, (item) => {
+            if (item.type !== 'page') {
+              return item;
+            }
+
+            return {
+              ...item,
+              width: nextWidth,
+              scale: nextScale,
+            };
+          });
+          return;
+        }
+
+        const nextVisibleHeight = clamp((dragStartRef.current.originViewportHeight ?? draggedItem.visibleHeight) + dy / zoom, 120, 980);
+
+        updateItem(dragStartRef.current.id, (item) => {
+          if (item.type !== 'page') {
+            return item;
+          }
+
+          return {
+            ...item,
+            height: nextVisibleHeight,
+            visibleHeight: nextVisibleHeight,
+          };
+        });
+        return;
+      }
+
       const nextWidth = clamp((dragStartRef.current.originWidth ?? 200) + dx / zoom, 160, 900);
       const nextHeight = clamp((dragStartRef.current.originHeight ?? 140) + dy / zoom, 120, 900);
 
@@ -940,20 +1218,40 @@ export const Canvas = () => {
     setZoom(nextZoom);
   };
 
-  const handlePageCommit = (id: string) => {
+  const capturePageImage = async (url: string) => {
+    try {
+      const base64 = await invoke<string>('capture_page', { url });
+      return `data:image/png;base64,${base64}`;
+    } catch (error) {
+      console.warn('No se pudo generar la captura local de la página:', error);
+      return null;
+    }
+  };
+
+  const handlePageCommit = async (id: string) => {
     const rawValue = (pageDrafts[id] ?? '').trim();
     if (!rawValue) {
       return;
     }
 
     const normalized = /^https?:\/\//i.test(rawValue) ? rawValue : `https://${rawValue}`;
+    setPageLoadingIds((current) => ({ ...current, [id]: true }));
 
-    updateItem(id, (item) => ({
-      ...item,
-      type: 'page',
-      url: normalized,
-      title: 'Página web',
-    }));
+    try {
+      const captureUrl = await capturePageImage(normalized);
+
+      updateItem(id, (item) => ({
+        ...item,
+        type: 'page',
+        url: normalized,
+        title: 'Página web',
+        captureUrl: captureUrl ?? undefined,
+        scale: item.type === 'page' ? item.scale || 1 : 1,
+        visibleHeight: item.type === 'page' ? item.visibleHeight || item.height : item.height,
+      }));
+    } finally {
+      setPageLoadingIds((current) => ({ ...current, [id]: false }));
+    }
   };
 
   const toggleContainer = (id: string) => {
@@ -1182,7 +1480,7 @@ export const Canvas = () => {
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
-                handlePageCommit(item.id);
+                void handlePageCommit(item.id);
                 setEditingId(null);
               }
             }}
@@ -1191,18 +1489,58 @@ export const Canvas = () => {
       );
     }
 
+    if (!item.captureUrl && pageLoadingIds[item.id]) {
+      return (
+        <div className="canvas-page-loading">
+          <span>Generando captura…</span>
+        </div>
+      );
+    }
+
+    if (!item.captureUrl) {
+      return (
+        <div className="canvas-page-loading canvas-page-loading-empty">
+          <span>Página sin captura</span>
+        </div>
+      );
+    }
+
+    const viewportHeight = item.visibleHeight || item.height;
+    const contentScale = item.scale || 1;
+
     return (
-      <div className="canvas-website-frame">
-        <iframe
-          title={item.title}
-          src={item.url}
-          className="canvas-media website-frame"
-          sandbox="allow-scripts allow-same-origin"
-          referrerPolicy="strict-origin-when-cross-origin"
-          loading="lazy"
-          scrolling="no"
-          allow="fullscreen"
-        />
+      <div
+        className="canvas-page-capture-wrap"
+        style={{
+          width: item.width,
+          height: viewportHeight,
+        }}
+      >
+        <div
+          className="canvas-page-capture"
+          style={{
+            width: item.width,
+            height: viewportHeight,
+            overflow: 'hidden',
+            borderRadius: '8px',
+            transform: `scale(${contentScale})`,
+            transformOrigin: 'top center',
+          }}
+        >
+          <img
+            src={item.captureUrl}
+            alt={item.title}
+            className="canvas-page-capture-image"
+            loading="lazy"
+            style={{
+              width: '100%',
+              height: 'auto',
+              display: 'block',
+              objectFit: 'cover',
+              objectPosition: 'top center',
+            }}
+          />
+        </div>
       </div>
     );
   };
@@ -1215,6 +1553,7 @@ export const Canvas = () => {
 
   return (
     <div
+      ref={viewportRef}
       className={`canvas-shell ${isDragging ? 'dragging' : ''}`}
       onMouseDown={beginPan}
       onMouseMove={handleMouseMove}
@@ -1263,6 +1602,57 @@ export const Canvas = () => {
         accept="image/*,video/*,audio/*,.pdf,.md,.markdown,.txt,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.json,.xml,.html,.css,.js,.ts,.tsx,.jsx,.py,.java,.c,.cpp,.php,.rtf"
       />
 
+      <input
+        ref={projectInputRef}
+        type="file"
+        className="sr-only-input"
+        onChange={handleProjectImport}
+        accept=".osp,application/json"
+      />
+
+      {canvasSettingsOpen && (
+        <div className="canvas-settings-panel">
+          <div className="canvas-settings-header">
+            <strong>Configuración del canvas</strong>
+            <button type="button" onClick={() => setCanvasSettingsOpen(false)}>Cerrar</button>
+          </div>
+
+          <label>
+            <span>Fondo</span>
+            <input
+              type="color"
+              value={canvasBackground}
+              onChange={(event) => setCanvasBackground(event.target.value)}
+            />
+          </label>
+
+          <label className="canvas-settings-toggle">
+            <input
+              type="checkbox"
+              checked={canvasGridEnabled}
+              onChange={(event) => setCanvasGridEnabled(event.target.checked)}
+            />
+            <span>Mostrar cuadrícula</span>
+          </label>
+        </div>
+      )}
+
+      {fileSettingsOpen && (
+        <div className="canvas-settings-panel">
+          <div className="canvas-settings-header">
+            <strong>Archivo</strong>
+            <button type="button" onClick={() => setFileSettingsOpen(false)}>Cerrar</button>
+          </div>
+
+          <button type="button" onClick={() => { saveCanvasProject(); setFileSettingsOpen(false); }}>
+            Guardar proyecto (.osp)
+          </button>
+          <button type="button" onClick={() => { projectInputRef.current?.click(); setFileSettingsOpen(false); }}>
+            Abrir proyecto (.osp)
+          </button>
+        </div>
+      )}
+
       {contextMenu && (
         <div
           className="canvas-context-menu"
@@ -1278,7 +1668,9 @@ export const Canvas = () => {
       <div
         className="canvas-surface"
         style={{
+          background: canvasBackground,
           transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          boxShadow: canvasGridEnabled ? 'inset 0 0 0 1px rgba(15, 23, 42, 0.04)' : 'none',
         }}
       >
         <div className="canvas-content">
@@ -1397,7 +1789,14 @@ export const Canvas = () => {
                 }}
               >
                 <div className="canvas-item-body">{renderItemContent(item)}</div>
-                {!isContainerItem(item) && <div className="canvas-resize-handle" onMouseDown={(event) => startResize(event, item.id)} />}
+                {item.type === 'page' ? (
+                  <>
+                    <div className="canvas-page-handle canvas-page-handle-right" onMouseDown={(event) => startPageResize(event, item.id, 'scale')} />
+                    <div className="canvas-page-handle canvas-page-handle-bottom" onMouseDown={(event) => startPageResize(event, item.id, 'viewport')} />
+                  </>
+                ) : !isContainerItem(item) ? (
+                  <div className="canvas-resize-handle" onMouseDown={(event) => startResize(event, item.id)} />
+                ) : null}
               </div>
             );
           })}
