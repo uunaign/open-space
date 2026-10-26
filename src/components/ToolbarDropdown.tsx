@@ -32,7 +32,7 @@ export const ToolbarDropdown = ({ triggerIcon, title, children }: ToolbarDropdow
       </button>
 
       {isOpen && (
-        <div className="dropdown-menu">
+        <div className="dropdown-menu" onClick={() => setIsOpen(false)}>
           {children}
         </div>
       )}

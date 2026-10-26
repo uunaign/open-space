@@ -25,6 +25,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../scripts/capture-page.mjs": "capture/scripts/capture-page.mjs",
+      "../node_modules/playwright/": "capture/node_modules/playwright/",
+      "../node_modules/playwright-core/": "capture/node_modules/playwright-core/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

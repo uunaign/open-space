@@ -18,7 +18,7 @@ export const ToolBar = () => {
     <div className="toolbar-container">
       <button
         className="toolbar-btn"
-        title="Notas"
+        title="Crear nota (N)"
         onClick={() => emitCanvasEvent('canvas-create-note')}
       >
         <StickyNote size={20} />
@@ -26,13 +26,13 @@ export const ToolBar = () => {
 
       <button
         className="toolbar-btn"
-        title="Agrupar elementos seleccionados"
+        title="Agrupar elementos seleccionados (Ctrl+G)"
         onClick={() => emitCanvasEvent('canvas-group-selected')}
       >
         <LayoutGrid size={20} />
       </button>
 
-      <ToolbarDropdown triggerIcon={<Download size={20} />} title="Importar">
+      <ToolbarDropdown triggerIcon={<Download size={20} />} title="Importar (Ctrl+I)">
         <DropdownItem
           icon={<FileUp size={16} />}
           onClick={() => emitCanvasEvent('canvas-open-file-import')}
@@ -49,7 +49,7 @@ export const ToolBar = () => {
 
       <button
         className="toolbar-btn"
-        title="Añadir carpeta"
+        title="Añadir carpeta (F)"
         onClick={() => emitCanvasEvent('canvas-create-folder')}
       >
         <Folder size={20} />

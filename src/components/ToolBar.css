@@ -6,7 +6,7 @@
   background-color: rgba(23, 23, 23, 0.8);
   backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 5px 6px;
+  padding: 6px;
   border-radius: 9999px;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
   display: flex;
@@ -15,10 +15,11 @@
   z-index: 50;
 }
 
+
 .toolbar-btn {
   background: transparent;
   border: none;
-  color: #a3a3a3; /* Gris claro */
+  color: #a3a3a3;
   padding: 10px 15px;
   border-radius: 9999px;
   cursor: pointer;

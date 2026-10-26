@@ -1,12 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import folderFrontImage from '../assets/Carpeta_delantera.svg';
-import folderBackImage from '../assets/Carpeta_trasera.svg';
+import { Maximize, Minimize } from 'lucide-react';
+import folderFrontSvg from '../assets/Carpeta_delantera.svg?raw';
+import folderBackSvg from '../assets/Carpeta_trasera.svg?raw';
+import { LayerBar } from './LayerBar';
 import './Canvas.css';
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
 const DEFAULT_PAGE_HEIGHT = 520;
+const DEFAULT_FOLDER_COLOR = '#30D9FF';
+const FOLDER_COLORS = [
+  { value: DEFAULT_FOLDER_COLOR, label: 'Cian pastel' },
+  { value: '#F3BFCB', label: 'Rosa' },
+  { value: '#F8D2A6', label: 'Melocotón' },
+  { value: '#F1E4A4', label: 'Amarillo' },
+  { value: '#BFE0C7', label: 'Menta' },
+  { value: '#BFD8F0', label: 'Azul' },
+  { value: '#D3C4E8', label: 'Lavanda' },
+  { value: '#D8DADF', label: 'Gris' },
+];
 
 const escapeHtml = (value: string) =>
   value
@@ -24,6 +37,7 @@ const formatInlineMarkdown = (value: string) => {
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/_(.+?)_/g, '<em>$1</em>')
+    .replace(/~~(.+?)~~/g, '<del>$1</del>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\[(.+?)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 };
@@ -32,14 +46,24 @@ const renderMarkdownText = (value: string) => {
   const lines = value.split(/\n/);
   const html: string[] = [];
   let listItems: string[] = [];
+  let orderedItems: string[] = [];
+  let firstContentLine = true;
 
   const flushList = () => {
     if (listItems.length === 0) {
+      if (orderedItems.length > 0) {
+        html.push(`<ol>${orderedItems.map((item) => `<li>${formatInlineMarkdown(item)}</li>`).join('')}</ol>`);
+        orderedItems = [];
+      }
       return;
     }
 
     html.push(`<ul>${listItems.map((item) => `<li>${formatInlineMarkdown(item)}</li>`).join('')}</ul>`);
     listItems = [];
+    if (orderedItems.length > 0) {
+      html.push(`<ol>${orderedItems.map((item) => `<li>${formatInlineMarkdown(item)}</li>`).join('')}</ol>`);
+      orderedItems = [];
+    }
   };
 
   for (const rawLine of lines) {
@@ -52,6 +76,15 @@ const renderMarkdownText = (value: string) => {
       continue;
     }
 
+    if (firstContentLine) {
+      firstContentLine = false;
+      if (!/^#{1,3}\s+/.test(trimmed)) {
+        flushList();
+        html.push(`<h1>${formatInlineMarkdown(trimmed)}</h1>`);
+        continue;
+      }
+    }
+
     if (/^#{1,3}\s+/.test(trimmed)) {
       flushList();
       const level = trimmed.match(/^#+/)?.[0].length ?? 1;
@@ -61,7 +94,20 @@ const renderMarkdownText = (value: string) => {
     }
 
     if (/^[-*]\s+/.test(trimmed)) {
+      if (orderedItems.length > 0) flushList();
       listItems.push(trimmed.replace(/^[-*]\s+/, ''));
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      if (listItems.length > 0) flushList();
+      orderedItems.push(trimmed.replace(/^\d+\.\s+/, ''));
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      flushList();
+      html.push(`<blockquote><p>${formatInlineMarkdown(trimmed.replace(/^>\s?/, ''))}</p></blockquote>`);
       continue;
     }
 
@@ -73,7 +119,116 @@ const renderMarkdownText = (value: string) => {
   return html.join('');
 };
 
-interface PanState {
+const markdownInlineFromNode = (node: Node): string => {
+  if (node.nodeType === Node.TEXT_NODE) return (node.textContent ?? '').replace(/\u00a0/g, ' ');
+  if (!(node instanceof HTMLElement)) return '';
+
+  const content = Array.from(node.childNodes, markdownInlineFromNode).join('');
+  switch (node.tagName) {
+    case 'BR': return '\n';
+    case 'STRONG':
+    case 'B': return `**${content}**`;
+    case 'EM':
+    case 'I': return `*${content}*`;
+    case 'CODE': return `\`${content}\``;
+    case 'DEL': return `~~${content}~~`;
+    case 'A': return `[${content}](${(node as HTMLAnchorElement).href})`;
+    default: return content;
+  }
+};
+
+const markdownFromEditor = (editor: HTMLElement) => {
+  const blocks = Array.from(editor.children);
+  if (blocks.length === 0) return markdownInlineFromNode(editor).trim();
+
+  return blocks.map((block) => {
+    const content = Array.from(block.childNodes, markdownInlineFromNode).join('').trimEnd();
+    switch (block.tagName) {
+      case 'H1': return `# ${content}`;
+      case 'H2': return `## ${content}`;
+      case 'H3': return `### ${content}`;
+      case 'UL': return Array.from(block.children).map((item) => `- ${markdownInlineFromNode(item).trim()}`).join('\n');
+      case 'OL': return Array.from(block.children).map((item, index) => `${index + 1}. ${markdownInlineFromNode(item).trim()}`).join('\n');
+      case 'BLOCKQUOTE': return markdownInlineFromNode(block).split('\n').map((line) => `> ${line}`).join('\n');
+      case 'P':
+      case 'DIV': return content;
+      default: return markdownInlineFromNode(block).trimEnd();
+    }
+  }).join('\n');
+};
+
+const getEditorText = (node: Node): string => {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
+  if (!(node instanceof HTMLElement) && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return '';
+  if (node instanceof HTMLElement && node.tagName === 'BR') return '\n';
+  const children = Array.from(node.childNodes);
+  if (node instanceof HTMLElement && (node.tagName === 'UL' || node.tagName === 'OL')) {
+    return children.map(getEditorText).join('\n');
+  }
+  return children.map(getEditorText).join('');
+};
+
+const restoreEditorCaret = (editor: HTMLElement, offset: number) => {
+  const selection = window.getSelection();
+  if (!selection) return;
+  let remaining = offset;
+  const placeWithin = (root: Node, localOffset: number) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode: (node) => node.nodeType === Node.TEXT_NODE || (node instanceof HTMLElement && node.tagName === 'BR')
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_SKIP,
+    });
+    let node = walker.nextNode();
+    let localRemaining = localOffset;
+    let target: Node = root;
+    let targetOffset = 0;
+    while (node) {
+      const isBreak = node instanceof HTMLElement && node.tagName === 'BR';
+      const length = isBreak ? 1 : node.textContent?.length ?? 0;
+      if (localRemaining <= length) {
+        if (isBreak && node.parentNode) {
+          target = node.parentNode;
+          targetOffset = Array.prototype.indexOf.call(node.parentNode.childNodes, node) + (localRemaining > 0 ? 1 : 0);
+        } else {
+          target = node;
+          targetOffset = localRemaining;
+        }
+        break;
+      }
+      localRemaining -= length;
+      node = walker.nextNode();
+    }
+    if (node === null) {
+      target = root;
+      targetOffset = root.childNodes.length;
+    }
+    const range = document.createRange();
+    const maxOffset = target.nodeType === Node.TEXT_NODE ? target.textContent?.length ?? 0 : target.childNodes.length;
+    range.setStart(target, Math.min(targetOffset, maxOffset));
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  const blocks = Array.from(editor.children);
+  if (!blocks.length) {
+    placeWithin(editor, remaining);
+    return;
+  }
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    const length = getEditorText(block).length;
+    if (remaining <= length) {
+      placeWithin(block, remaining);
+      return;
+    }
+    remaining -= length;
+    if (index < blocks.length - 1) remaining -= 1;
+  }
+  placeWithin(blocks[blocks.length - 1], getEditorText(blocks[blocks.length - 1]).length);
+};
+
+export interface PanState {
   x: number;
   y: number;
 }
@@ -88,6 +243,8 @@ interface BaseCanvasItem {
   width: number;
   height: number;
   title: string;
+  stackOriginalWidth?: number;
+  stackOriginalHeight?: number;
 }
 
 interface NoteCanvasItem extends BaseCanvasItem {
@@ -102,12 +259,20 @@ interface FileCanvasItem extends BaseCanvasItem {
   previewUrl: string;
   textContent?: string;
   sizeLabel?: string;
+  sourceUrl?: string;
+  embedUrl?: string;
+  fileKind?: 'social' | 'document';
+  htmlContent?: string;
+  imageRatio?: number;
+  imageFrameInset?: number;
 }
 
 interface PageCanvasItem extends BaseCanvasItem {
   type: 'page';
   url: string;
   captureUrl?: string;
+  captureWidth?: number;
+  captureHeight?: number;
   scale: number;
   visibleHeight: number;
 }
@@ -122,9 +287,25 @@ interface FolderCanvasItem extends BaseCanvasItem {
   type: 'folder';
   childIds: string[];
   expanded: boolean;
+  color?: string;
 }
 
-type CanvasItem = NoteCanvasItem | FileCanvasItem | PageCanvasItem | GroupCanvasItem | FolderCanvasItem;
+export type CanvasItem = NoteCanvasItem | FileCanvasItem | PageCanvasItem | GroupCanvasItem | FolderCanvasItem;
+
+export interface CanvasSnapshot {
+  version: number;
+  savedAt: string;
+  pan: PanState;
+  zoom: number;
+  canvasBackground: string;
+  canvasGridEnabled: boolean;
+  items: CanvasItem[];
+}
+
+interface CanvasProps {
+  initialSnapshot?: CanvasSnapshot;
+  onSave: (snapshot: CanvasSnapshot) => Promise<void>;
+}
 
 interface DragInteraction {
   kind: 'pan' | 'move' | 'resize';
@@ -145,7 +326,69 @@ interface DragInteraction {
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+const getUrlHost = (url: string) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+};
+const getPageImageWidth = (item: PageCanvasItem) => item.width * (item.scale || 1);
+const getPageImageHeight = (item: PageCanvasItem) => item.captureWidth && item.captureHeight
+  ? getPageImageWidth(item) * item.captureHeight / item.captureWidth
+  : Math.max(item.height, item.visibleHeight);
 const isContainerItem = (item: CanvasItem) => item.type === 'group' || item.type === 'folder';
+
+const getMimeType = (file: File) => {
+  if (file.type) return file.type;
+  const extension = file.name.toLowerCase().split('.').pop();
+  const types: Record<string, string> = {
+    pdf: 'application/pdf', md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain',
+    html: 'text/html', htm: 'text/html', json: 'application/json', xml: 'application/xml',
+    doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  };
+  return (extension && types[extension]) || 'application/octet-stream';
+};
+
+const extractDocxText = async (file: File) => {
+  const buffer = await file.arrayBuffer();
+  const view = new DataView(buffer);
+  let endRecord = -1;
+  for (let offset = Math.max(0, view.byteLength - 65_557); offset <= view.byteLength - 22; offset += 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) endRecord = offset;
+  }
+  if (endRecord < 0) return '';
+  const entries = view.getUint16(endRecord + 10, true);
+  let cursor = view.getUint32(endRecord + 16, true);
+  const decoder = new TextDecoder();
+  for (let index = 0; index < entries && cursor + 46 <= view.byteLength; index += 1) {
+    if (view.getUint32(cursor, true) !== 0x02014b50) break;
+    const method = view.getUint16(cursor + 10, true);
+    const compressedSize = view.getUint32(cursor + 20, true);
+    const nameLength = view.getUint16(cursor + 28, true);
+    const extraLength = view.getUint16(cursor + 30, true);
+    const commentLength = view.getUint16(cursor + 32, true);
+    const localOffset = view.getUint32(cursor + 42, true);
+    const name = decoder.decode(new Uint8Array(buffer, cursor + 46, nameLength));
+    cursor += 46 + nameLength + extraLength + commentLength;
+    if (name !== 'word/document.xml') continue;
+    const dataOffset = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
+    const compressed = new Uint8Array(buffer, dataOffset, compressedSize);
+    let bytes: Uint8Array;
+    if (method === 0) bytes = compressed;
+    else if (method === 8 && typeof DecompressionStream !== 'undefined') {
+      const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    } else return '';
+    const xml = new DOMParser().parseFromString(decoder.decode(bytes), 'application/xml');
+    return Array.from(xml.getElementsByTagName('w:p')).map((paragraph) =>
+      Array.from(paragraph.getElementsByTagName('w:t')).map((node) => node.textContent ?? '').join(''),
+    ).join('\n');
+  }
+  return '';
+};
 const GROUP_ITEM_GAP = 15;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
@@ -217,24 +460,47 @@ const getGroupCollapsedPositions = (group: GroupCanvasItem, children: CanvasItem
   );
 };
 
+const getGroupStackChild = (item: CanvasItem): CanvasItem => {
+  const originalWidth = item.stackOriginalWidth ?? item.width;
+  const originalHeight = item.stackOriginalHeight ?? item.height;
+  const scale = Math.min(1, 180 / originalWidth, 120 / originalHeight);
+  return {
+    ...item,
+    width: originalWidth * scale,
+    height: originalHeight * scale,
+    stackOriginalWidth: scale < 1 ? originalWidth : undefined,
+    stackOriginalHeight: scale < 1 ? originalHeight : undefined,
+  };
+};
+
+const restoreGroupStackChild = (item: CanvasItem): CanvasItem => ({
+  ...item,
+  width: item.stackOriginalWidth ?? item.width,
+  height: item.stackOriginalHeight ?? item.height,
+  stackOriginalWidth: undefined,
+  stackOriginalHeight: undefined,
+});
+
 const getFolderChildPosition = (
   folder: FolderCanvasItem,
   index: number,
   childCount: number,
   expanded = folder.expanded,
 ) => {
-  const middle = (childCount - 1) / 2;
-  const spread = childCount > 1 ? Math.min(112, 420 / (childCount - 1)) : 0;
-  const curve = childCount > 1 ? Math.sin((index / (childCount - 1)) * Math.PI) * 42 : 0;
+  const columns = childCount >= 4 ? 4 : 3;
+  const row = Math.floor(index / columns);
+  const column = index % columns;
+  const itemsInRow = Math.min(columns, childCount - row * columns);
 
   return {
-    x: folder.x + folder.width / 2 - 75 + (index - middle) * spread,
-    y: expanded ? folder.y - 100 - curve : folder.y + folder.height / 2 - 48,
+    x: folder.x + folder.width / 2 - 75 + (column - (itemsInRow - 1) / 2) * 166,
+    y: expanded ? folder.y - 124 - row * 116 : folder.y + folder.height / 2 - 48,
   };
 };
 
 const repositionContainerChildren = (items: CanvasItem[]) => {
   const positions = new Map<string, { x: number; y: number }>();
+  const childUpdates = new Map<string, CanvasItem>();
 
   items.forEach((container) => {
     if (!isContainerItem(container)) {
@@ -242,24 +508,31 @@ const repositionContainerChildren = (items: CanvasItem[]) => {
     }
 
     const children = items.filter((item) => container.childIds.includes(item.id));
+    const groupChildren = container.type === 'group'
+      ? container.expanded ? children.map(restoreGroupStackChild) : children.map(getGroupStackChild)
+      : children;
     const childPositions =
       container.type === 'folder'
         ? new Map(
-            children.map((child, index) => [
+            groupChildren.map((child, index) => [
               child.id,
-              getFolderChildPosition(container, index, children.length),
+              getFolderChildPosition(container, index, groupChildren.length),
             ]),
           )
         : container.expanded
-          ? getGroupExpandedPositions(container, children)
-          : getGroupCollapsedPositions(container, children);
+          ? getGroupExpandedPositions(container, groupChildren)
+          : getGroupCollapsedPositions(container, groupChildren);
 
     childPositions.forEach((position, childId) => positions.set(childId, position));
+    groupChildren.forEach((child) => {
+      childUpdates.set(child.id, child);
+    });
   });
 
   return items.map((item) => {
     const position = positions.get(item.id);
-    return position ? { ...item, ...position } : item;
+    const childUpdate = childUpdates.get(item.id);
+    return position ? { ...item, ...(childUpdate ?? {}), ...position } : item;
   });
 };
 
@@ -271,46 +544,29 @@ const makeId = () => {
   return `item-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
-const initialItems: CanvasItem[] = [
-  {
-    id: makeId(),
-    type: 'note',
-    x: 180,
-    y: 120,
-    width: 220,
-    height: 150,
-    title: 'Nota',
-    text: 'Ideas principales\n\n- estructura clara\n- flujo visual limpio\n- contenido mínimo',
-  },
-  {
-    id: makeId(),
-    type: 'note',
-    x: 540,
-    y: 230,
-    width: 220,
-    height: 150,
-    title: 'Trabajo',
-    text: 'Revisar la propuesta final\nDefinir necesidades del usuario',
-  },
-];
-
-export const Canvas = () => {
-  const [pan, setPan] = useState<PanState>({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
+export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
+  const [pan, setPan] = useState<PanState>(initialSnapshot?.pan ?? { x: 0, y: 0 });
+  const [zoom, setZoom] = useState(initialSnapshot?.zoom ?? 1);
   const [isDragging, setIsDragging] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
-  const [items, setItems] = useState<CanvasItem[]>(initialItems);
+  const [items, setItems] = useState<CanvasItem[]>(initialSnapshot?.items ?? []);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [fullscreenNoteId, setFullscreenNoteId] = useState<string | null>(null);
+  const [fullscreenNoteClosing, setFullscreenNoteClosing] = useState(false);
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [pageDrafts, setPageDrafts] = useState<Record<string, string>>({});
   const [pageLoadingIds, setPageLoadingIds] = useState<Record<string, boolean>>({});
+  const [pageCaptureErrors, setPageCaptureErrors] = useState<Record<string, string>>({});
   const [canvasSettingsOpen, setCanvasSettingsOpen] = useState(false);
   const [fileSettingsOpen, setFileSettingsOpen] = useState(false);
-  const [canvasBackground, setCanvasBackground] = useState('#ffffff');
-  const [canvasGridEnabled, setCanvasGridEnabled] = useState(false);
+  const [layerBarOpen, setLayerBarOpen] = useState(false);
+  const [canvasBackground, setCanvasBackground] = useState(initialSnapshot?.canvasBackground ?? '#ffffff');
+  const [canvasGridEnabled, setCanvasGridEnabled] = useState(initialSnapshot?.canvasGridEnabled ?? false);
   const dragStartRef = useRef<DragInteraction | null>(null);
+  const fullscreenNoteEditorRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const projectInputRef = useRef<HTMLInputElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -318,6 +574,7 @@ export const Canvas = () => {
   const zoomRef = useRef(zoom);
   const centerAnimationRef = useRef<number | null>(null);
   const hasMovedItemRef = useRef(false);
+  const pageCaptureAttemptedUrlsRef = useRef(new Map<string, string>());
 
   const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -327,16 +584,32 @@ export const Canvas = () => {
   });
 
   const saveCanvasProject = () => {
-    const snapshot = {
+    const snapshot: CanvasSnapshot = {
       version: 1,
       savedAt: new Date().toISOString(),
-      pan,
-      zoom,
+      pan: panRef.current,
+      zoom: zoomRef.current,
       canvasBackground,
       canvasGridEnabled,
       items,
     };
 
+    void onSave(snapshot).catch((error: unknown) => {
+      console.error('No se pudo guardar el canvas:', error);
+      window.alert('No se pudo guardar el canvas en este dispositivo.');
+    });
+  };
+
+  const exportCanvasProject = () => {
+    const snapshot: CanvasSnapshot = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      pan: panRef.current,
+      zoom: zoomRef.current,
+      canvasBackground,
+      canvasGridEnabled,
+      items,
+    };
     const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -394,10 +667,79 @@ export const Canvas = () => {
   }, [zoom]);
 
   useEffect(() => {
+    if (!fullscreenNoteId || !fullscreenNoteEditorRef.current) return;
+    const note = items.find((item): item is NoteCanvasItem => item.id === fullscreenNoteId && item.type === 'note');
+    if (!note) return;
+    fullscreenNoteEditorRef.current.innerHTML = renderMarkdownText(note.text);
+    fullscreenNoteEditorRef.current.focus();
+    restoreEditorCaret(fullscreenNoteEditorRef.current, 0);
+  }, [fullscreenNoteId]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditingText =
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+      const isModifierPressed = event.ctrlKey || event.metaKey;
+
+      if (event.key === 'Escape' && fullscreenNoteId) {
+        setFullscreenNoteClosing(true);
+        return;
+      }
+
+      if (isModifierPressed && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        saveCanvasProject();
+        return;
+      }
+
+      if (isModifierPressed && event.key.toLowerCase() === 'o') {
+        event.preventDefault();
+        projectInputRef.current?.click();
+        return;
+      }
+
+      if (isEditingText) {
+        return;
+      }
+
+      if (!isModifierPressed && event.key.toLowerCase() === 'l') {
+        setLayerBarOpen((current) => !current);
+        return;
+      }
+
       if (event.code === 'Space') {
         event.preventDefault();
         setIsSpacePressed(true);
+      }
+
+      if (isModifierPressed && event.key.toLowerCase() === 'i') {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent(event.shiftKey ? 'canvas-open-page-import' : 'canvas-open-file-import'));
+        return;
+      }
+
+      if (isModifierPressed && event.key.toLowerCase() === 'g') {
+        event.preventDefault();
+        createGroupFromSelection();
+        return;
+      }
+
+      if (isModifierPressed && event.shiftKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent('canvas-center-view'));
+        return;
+      }
+
+      if (!isModifierPressed && event.key.toLowerCase() === 'n') {
+        window.dispatchEvent(new CustomEvent('canvas-create-note'));
+        return;
+      }
+
+      if (!isModifierPressed && event.key.toLowerCase() === 'f') {
+        window.dispatchEvent(new CustomEvent('canvas-create-folder'));
+        return;
       }
 
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIds.length > 0) {
@@ -408,6 +750,7 @@ export const Canvas = () => {
       }
 
       if (event.key === 'Escape') {
+        if (fullscreenNoteId) setFullscreenNoteClosing(true);
         setContextMenu(null);
         setEditingId(null);
         collapseAllGroups();
@@ -446,22 +789,27 @@ export const Canvas = () => {
       setPageDrafts((current) => ({ ...current, [newItem.id]: '' }));
     };
 
-    const createNote = () => {
-      const center = getViewportCenterPosition(220, 150);
+    const createNoteAt = (x: number, y: number) => {
       const newItem: NoteCanvasItem = {
         id: makeId(),
         type: 'note',
-        x: center.x,
-        y: center.y,
+        x,
+        y,
         width: 220,
         height: 150,
-        title: 'Nota',
-        text: 'Escribe aquí...',
+        title: '',
+        text: '',
       };
 
       setItems((current) => [...current, newItem]);
       updateSelection([newItem.id]);
       setEditingId(newItem.id);
+    };
+
+    const createNote = (event?: Event) => {
+      const detail = (event as CustomEvent<{ x?: number; y?: number }> | undefined)?.detail;
+      const center = getViewportCenterPosition(220, 150);
+      createNoteAt(detail?.x ?? center.x, detail?.y ?? center.y);
     };
 
     const groupSelected = () => {
@@ -494,11 +842,7 @@ export const Canvas = () => {
         (item) => item.type !== 'group' && !items.some((entry) => entry.type === 'folder' && !entry.expanded && entry.childIds.includes(item.id)),
       );
 
-      if (allVisibleItems.length === 0) {
-        return;
-      }
-
-      const bounds = allVisibleItems.reduce(
+      const bounds = allVisibleItems.length > 0 ? allVisibleItems.reduce(
         (acc, item) => ({
           minX: Math.min(acc.minX, item.x),
           minY: Math.min(acc.minY, item.y),
@@ -506,13 +850,19 @@ export const Canvas = () => {
           maxY: Math.max(acc.maxY, item.y + item.height),
         }),
         { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: Number.NEGATIVE_INFINITY, maxY: Number.NEGATIVE_INFINITY },
-      );
+      ) : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
 
       const shellRect = viewport.getBoundingClientRect();
       const centerX = (bounds.minX + bounds.maxX) / 2;
       const centerY = (bounds.minY + bounds.maxY) / 2;
-      const nextPanX = shellRect.width / 2 - centerX * zoomRef.current;
-      const nextPanY = shellRect.height / 2 - centerY * zoomRef.current;
+      const contentWidth = bounds.maxX - bounds.minX;
+      const contentHeight = bounds.maxY - bounds.minY;
+      const fitZoom = allVisibleItems.length > 0
+        ? clamp(Math.min((shellRect.width - 96) / Math.max(contentWidth, 1), (shellRect.height - 96) / Math.max(contentHeight, 1)), MIN_ZOOM, MAX_ZOOM)
+        : 1;
+      const nextPanX = shellRect.width / 2 - centerX * fitZoom;
+      const nextPanY = shellRect.height / 2 - centerY * fitZoom;
+      const startZoom = zoomRef.current;
       const startX = panRef.current.x;
       const startY = panRef.current.y;
       const startTime = performance.now();
@@ -523,9 +873,12 @@ export const Canvas = () => {
         const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
         const x = startX + (nextPanX - startX) * eased;
         const y = startY + (nextPanY - startY) * eased;
+        const nextZoom = startZoom + (fitZoom - startZoom) * eased;
 
         panRef.current = { x, y };
+        zoomRef.current = nextZoom;
         setPan({ x, y });
+        setZoom(nextZoom);
 
         if (progress < 1) {
           centerAnimationRef.current = requestAnimationFrame(tick);
@@ -572,7 +925,7 @@ export const Canvas = () => {
       window.removeEventListener('canvas-open-project', openProjectImport);
       window.removeEventListener('canvas-save', saveCanvasProject);
     };
-  }, [canvasBackground, canvasGridEnabled, items, pan, selectedId, selectedIds, zoom]);
+  }, [canvasBackground, canvasGridEnabled, fullscreenNoteId, initialSnapshot, items, onSave, selectedId, selectedIds]);
 
   const getViewportCenterPosition = (width: number, height: number) => {
     const viewport = viewportRef.current;
@@ -593,6 +946,45 @@ export const Canvas = () => {
   const updateSelection = (nextIds: string[]) => {
     setSelectedIds(nextIds);
     setSelectedId(nextIds[nextIds.length - 1] ?? null);
+  };
+
+  const reorderLayers = (draggedId: string, targetId: string) => {
+    setItems((current) => {
+      const topToBottom = [...current].reverse();
+      const draggedIndex = topToBottom.findIndex((item) => item.id === draggedId);
+      const targetIndex = topToBottom.findIndex((item) => item.id === targetId);
+
+      if (draggedIndex === -1 || targetIndex === -1) {
+        return current;
+      }
+
+      const [draggedItem] = topToBottom.splice(draggedIndex, 1);
+      const insertIndex = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex;
+      topToBottom.splice(insertIndex, 0, draggedItem);
+      return topToBottom.reverse();
+    });
+  };
+
+  const moveSelectedLayer = (direction: 'up' | 'down') => {
+    if (selectedIds.length !== 1) {
+      return;
+    }
+
+    setItems((current) => {
+      const topToBottom = [...current].reverse();
+      const selectedIndex = topToBottom.findIndex((item) => item.id === selectedIds[0]);
+      const targetIndex = selectedIndex + (direction === 'up' ? -1 : 1);
+
+      if (selectedIndex === -1 || targetIndex < 0 || targetIndex >= topToBottom.length) {
+        return current;
+      }
+
+      [topToBottom[selectedIndex], topToBottom[targetIndex]] = [
+        topToBottom[targetIndex],
+        topToBottom[selectedIndex],
+      ];
+      return topToBottom.reverse();
+    });
   };
 
   const updateItem = (id: string, updater: (item: CanvasItem) => CanvasItem) => {
@@ -641,13 +1033,15 @@ export const Canvas = () => {
       y: center.y,
       width: 320 * 0.8,
       height: 280 * 0.8,
-      title: 'Carpeta',
+      title: 'Nueva carpeta',
       childIds: [],
       expanded: false,
+      color: DEFAULT_FOLDER_COLOR,
     };
 
     setItems((current) => [...current, newItem]);
     updateSelection([newItem.id]);
+    setRenamingFolderId(newItem.id);
   };
 
   const createGroupFromSelection = () => {
@@ -687,12 +1081,13 @@ export const Canvas = () => {
       childIds: sorted.map((item) => item.id),
       expanded: false,
     };
-    const compactPositions = getGroupCollapsedPositions(compactGroup, sorted);
+    const compactChildren = sorted.map(getGroupStackChild);
+    const compactPositions = getGroupCollapsedPositions(compactGroup, compactChildren);
 
     setItems((current) => {
       const survivors = current.filter((item) => !selectedIds.includes(item.id) || isContainerItem(item));
 
-      const stacked = sorted.map((item) => ({
+      const stacked = compactChildren.map((item) => ({
         ...item,
         ...compactPositions.get(item.id),
       }));
@@ -721,7 +1116,9 @@ export const Canvas = () => {
       }
 
       const expandedGroup = { ...currentGroup, expanded: true };
-      const children = current.filter((item) => expandedGroup.childIds.includes(item.id));
+      const children = current
+        .filter((item) => expandedGroup.childIds.includes(item.id))
+        .map(restoreGroupStackChild);
       const positions = getGroupExpandedPositions(expandedGroup, children);
 
       return current.map((item) => {
@@ -730,7 +1127,8 @@ export const Canvas = () => {
         }
 
         const position = positions.get(item.id);
-        return position ? { ...item, ...position } : item;
+        const expandedChild = children.find((child) => child.id === item.id);
+        return position ? { ...item, ...(expandedChild ?? {}), ...position } : item;
       });
     });
   };
@@ -743,7 +1141,10 @@ export const Canvas = () => {
       }
 
       const collapsedGroup = { ...group, expanded: false };
-      const children = current.filter((item) => collapsedGroup.childIds.includes(item.id));
+      const children = current
+        .filter((item) => collapsedGroup.childIds.includes(item.id))
+        .map(restoreGroupStackChild)
+        .map(getGroupStackChild);
       const positions = getGroupCollapsedPositions(collapsedGroup, children);
 
       return current.map((item) => {
@@ -752,7 +1153,8 @@ export const Canvas = () => {
         }
 
         const position = positions.get(item.id);
-        return position ? { ...item, ...position } : item;
+        const collapsedChild = children.find((child) => child.id === item.id);
+        return position ? { ...item, ...(collapsedChild ?? {}), ...position } : item;
       });
     });
   };
@@ -766,23 +1168,7 @@ export const Canvas = () => {
 
         return item;
       });
-
-      const positions = new Map<string, { x: number; y: number }>();
-      next.forEach((group) => {
-        if (group.type !== 'group') {
-          return;
-        }
-
-        const children = next.filter((item) => group.childIds.includes(item.id));
-        getGroupCollapsedPositions(group, children).forEach((position, childId) => {
-          positions.set(childId, position);
-        });
-      });
-
-      return next.map((item) => {
-        const position = positions.get(item.id);
-        return position ? { ...item, ...position } : item;
-      });
+      return repositionContainerChildren(next);
     });
   };
 
@@ -797,39 +1183,187 @@ export const Canvas = () => {
     setContextMenu(null);
   };
 
-  const handleFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = Array.from(event.target.files ?? []);
-
+  const importFiles = async (selectedFiles: File[], position?: { x: number; y: number }) => {
+    const imported: CanvasItem[] = [];
     for (const file of selectedFiles) {
+      const mimeType = getMimeType(file);
+      const extension = file.name.toLowerCase().split('.').pop() ?? '';
+      const isImage = mimeType.startsWith('image/');
+      const isMedia = mimeType.startsWith('video/') || mimeType.startsWith('audio/');
+      const isPdf = mimeType === 'application/pdf';
+      const itemWidth = isImage ? 300 : isPdf ? 420 : isMedia ? 360 : 300;
+      const itemHeight = isImage ? 220 : isPdf ? 540 : isMedia ? 230 : 210;
+      const center = position ?? getViewportCenterPosition(itemWidth, itemHeight);
       const previewUrl = await readFileAsDataUrl(file);
-      const itemWidth = file.type.startsWith('image/') ? 300 : file.type === 'application/pdf' ? 340 : 260;
-      const itemHeight = file.type.startsWith('image/') ? 200 : file.type === 'application/pdf' ? 420 : 170;
-      const center = getViewportCenterPosition(itemWidth, itemHeight);
-
       const newItem: FileCanvasItem = {
-        id: makeId(),
-        type: 'file',
-        x: center.x,
-        y: center.y,
-        width: itemWidth,
-        height: itemHeight,
-        title: file.name,
-        mimeType: file.type || 'application/octet-stream',
-        fileName: file.name,
-        previewUrl,
+        id: makeId(), type: 'file', x: center.x, y: center.y, width: itemWidth, height: itemHeight,
+        title: file.name, mimeType, fileName: file.name, previewUrl,
         sizeLabel: `${Math.max(1, Math.round(file.size / 1024))} KB`,
       };
 
-      if (file.type.startsWith('text/') || file.name.toLowerCase().endsWith('.md') || file.name.toLowerCase().endsWith('.markdown')) {
-        const textContent = await file.text();
-        newItem.textContent = textContent.slice(0, 3000);
+      if (mimeType.startsWith('text/') || ['md', 'markdown', 'json', 'xml', 'html', 'htm', 'csv', 'rtf'].includes(extension)) {
+        const rawText = await file.text();
+        if (extension === 'html' || extension === 'htm') newItem.htmlContent = rawText.slice(0, 200_000);
+        else newItem.textContent = rawText.slice(0, 20_000);
+      } else if (extension === 'docx') {
+        newItem.fileKind = 'document';
+        newItem.textContent = (await extractDocxText(file)).slice(0, 20_000);
+      } else if (extension === 'doc') {
+        newItem.fileKind = 'document';
       }
+      imported.push(newItem);
+    }
+    if (imported.length) {
+      setItems((current) => [...current, ...imported]);
+      updateSelection([imported[imported.length - 1].id]);
+    }
+  };
 
-      setItems((current) => [...current, newItem]);
-      updateSelection([newItem.id]);
+  const handleFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    await importFiles(Array.from(event.target.files ?? []));
+    event.target.value = '';
+  };
+
+  const handleCanvasPaste = async (event: React.ClipboardEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+    const files = Array.from(event.clipboardData.files);
+    if (!files.length) {
+      for (const clipboardItem of Array.from(event.clipboardData.items)) {
+        if (clipboardItem.kind === 'file') {
+          const file = clipboardItem.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+    }
+    if (files.length) {
+      event.preventDefault();
+      await importFiles(files);
+      return;
     }
 
-    event.target.value = '';
+    const html = event.clipboardData.getData('text/html');
+    const plainText = event.clipboardData.getData('text/plain').trim();
+    const pastedUrl = plainText.match(/^https?:\/\/[^\s<>]+$/i)?.[0];
+    if (pastedUrl) {
+      event.preventDefault();
+      let parsed: URL;
+      try { parsed = new URL(pastedUrl); } catch { return; }
+      const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+      const youtubeId = host === 'youtu.be' ? parsed.pathname.slice(1) :
+        ['youtube.com', 'm.youtube.com', 'youtube-nocookie.com'].includes(host)
+          ? parsed.searchParams.get('v') || parsed.pathname.match(/\/(?:shorts|embed|live)\/([^/?]+)/)?.[1]
+          : null;
+      const spotifyMatch = host === 'open.spotify.com' && parsed.pathname.match(/^\/(track|album|playlist|episode|show)\/([^/?]+)/);
+      const vimeoId = host === 'vimeo.com' ? parsed.pathname.match(/^\/(\d+)/)?.[1] : null;
+      const statusId = (host === 'x.com' || host === 'twitter.com') ? parsed.pathname.match(/\/status\/(\d+)/)?.[1] : null;
+      const tiktokId = host.endsWith('tiktok.com') ? parsed.pathname.match(/\/video\/(\d+)/)?.[1] : null;
+      const instagramId = (host === 'instagram.com' || host === 'instagr.am') ? parsed.pathname.match(/\/(?:p|reel|tv)\/([^/?]+)/)?.[1] : null;
+      const embedUrl = youtubeId
+        ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(youtubeId)}`
+        : spotifyMatch
+          ? `https://open.spotify.com/embed/${spotifyMatch[1]}/${spotifyMatch[2]}`
+          : vimeoId
+            ? `https://player.vimeo.com/video/${vimeoId}`
+            : statusId
+              ? `https://platform.twitter.com/embed/Tweet.html?id=${statusId}&theme=light`
+            : tiktokId
+              ? `https://www.tiktok.com/player/v1/${tiktokId}`
+              : instagramId
+                ? `https://www.instagram.com/p/${instagramId}/embed/`
+              : undefined;
+      const isAudioEmbed = Boolean(spotifyMatch);
+      const center = getViewportCenterPosition(youtubeId || vimeoId ? 420 : 360, youtubeId || vimeoId ? 260 : isAudioEmbed ? 210 : 220);
+      if (youtubeId) {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 420, height: 260, title: 'YouTube',
+          fileName: 'YouTube', mimeType: 'video/x-embedded', previewUrl: pastedUrl,
+          embedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      if (spotifyMatch || vimeoId || tiktokId || instagramId) {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 360, height: isAudioEmbed ? 210 : 260,
+          title: isAudioEmbed ? 'Spotify' : instagramId ? 'Instagram' : tiktokId ? 'TikTok' : 'Vimeo',
+          fileName: isAudioEmbed ? 'Spotify' : instagramId ? 'Instagram' : tiktokId ? 'TikTok' : 'Vimeo',
+          mimeType: isAudioEmbed ? 'audio/x-embedded' : 'video/x-embedded', previewUrl: pastedUrl, embedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      if (host === 'x.com' || host === 'twitter.com') {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 360, height: 180, title: 'Publicación de X',
+          fileName: 'Publicación de X', mimeType: 'application/x-social-post', previewUrl: pastedUrl,
+          sourceUrl: pastedUrl, fileKind: 'social', embedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      if (/\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i.test(parsed.pathname + parsed.search)) {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 300, height: 220, title: 'Imagen', fileName: 'Imagen',
+          mimeType: 'image/*', previewUrl: pastedUrl, sourceUrl: pastedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      if (/\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(parsed.pathname + parsed.search)) {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 360, height: 230, title: 'Vídeo', fileName: 'Vídeo',
+          mimeType: 'video/mp4', previewUrl: pastedUrl, sourceUrl: pastedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      if (/\.(mp3|wav|ogg|m4a|aac)(\?.*)?$/i.test(parsed.pathname + parsed.search)) {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 360, height: 150, title: 'Audio', fileName: 'Audio',
+          mimeType: 'audio/mpeg', previewUrl: pastedUrl, sourceUrl: pastedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      if (/\.pdf(\?.*)?$/i.test(parsed.pathname + parsed.search)) {
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...center, width: 420, height: 540, title: parsed.hostname, fileName: 'Documento PDF',
+          mimeType: 'application/pdf', previewUrl: pastedUrl, sourceUrl: pastedUrl,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      const item: PageCanvasItem = {
+        id: makeId(), type: 'page', ...getViewportCenterPosition(520, DEFAULT_PAGE_HEIGHT), width: 520,
+        height: DEFAULT_PAGE_HEIGHT, title: getUrlHost(pastedUrl), url: pastedUrl, scale: 1, visibleHeight: DEFAULT_PAGE_HEIGHT,
+      };
+      setItems((current) => [...current, item]); updateSelection([item.id]); return;
+    }
+
+    if (html) {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const image = doc.querySelector('img[src]');
+      const src = image?.getAttribute('src');
+      if (src && (src.startsWith('data:image/') || /^https?:\/\//i.test(src))) {
+        event.preventDefault();
+        const item: FileCanvasItem = {
+          id: makeId(), type: 'file', ...getViewportCenterPosition(300, 220), width: 300, height: 220,
+          title: image?.getAttribute('alt') || 'Imagen pegada', fileName: image?.getAttribute('alt') || 'Imagen pegada',
+          mimeType: src.startsWith('data:image/') ? src.slice(5, src.indexOf(';')) : 'image/*', previewUrl: src,
+        };
+        setItems((current) => [...current, item]); updateSelection([item.id]); return;
+      }
+      const text = (doc.body.innerText || '').trim();
+      if (text && !plainText) {
+        event.preventDefault();
+        createPastedTextNote(text);
+      }
+      return;
+    }
+    if (plainText) {
+      event.preventDefault();
+      createPastedTextNote(plainText);
+    }
+  };
+
+  const createPastedTextNote = (text: string) => {
+    const position = getViewportCenterPosition(320, 220);
+    const note: NoteCanvasItem = { id: makeId(), type: 'note', ...position, width: 320, height: 220, title: '', text };
+    setItems((current) => [...current, note]); updateSelection([note.id]);
   };
 
   const handleProjectImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -866,7 +1400,7 @@ export const Canvas = () => {
 
   const startItemDrag = (event: React.MouseEvent<HTMLDivElement>, id: string) => {
     const target = event.target as HTMLElement;
-    if (target.closest('button, textarea, input, select, iframe, video, audio, embed')) {
+    if (target.closest('a, button, textarea, input, select, iframe, video, audio, embed')) {
       return;
     }
 
@@ -963,9 +1497,8 @@ export const Canvas = () => {
       startY: event.clientY,
       startPanX: pan.x,
       startPanY: pan.y,
-      originWidth: item.width,
+      originWidth: getPageImageWidth(item),
       originHeight: item.height,
-      originScale: item.scale,
       originViewportHeight: item.visibleHeight,
     };
     setIsDragging(true);
@@ -1036,9 +1569,7 @@ export const Canvas = () => {
       if (draggedItem?.type === 'page') {
         if (dragStartRef.current.resizeMode === 'scale') {
           const baseWidth = dragStartRef.current.originWidth ?? draggedItem.width;
-          const baseScale = dragStartRef.current.originScale ?? draggedItem.scale;
           const nextWidth = clamp(baseWidth + dx / zoom, 220, 980);
-          const nextScale = clamp(baseScale + (dx / zoom) / 180, 0.7, 2.6);
 
           updateItem(dragStartRef.current.id, (item) => {
             if (item.type !== 'page') {
@@ -1048,13 +1579,26 @@ export const Canvas = () => {
             return {
               ...item,
               width: nextWidth,
-              scale: nextScale,
+              scale: 1,
+              ...(item.captureWidth && item.captureHeight
+                ? (() => {
+                    const maxHeight = nextWidth * item.captureHeight / item.captureWidth;
+                    const visibleHeight = Math.min(item.visibleHeight || item.height, maxHeight);
+                    return { height: visibleHeight, visibleHeight };
+                  })()
+                : {}),
             };
           });
           return;
         }
 
-        const nextVisibleHeight = clamp((dragStartRef.current.originViewportHeight ?? draggedItem.visibleHeight) + dy / zoom, 120, 980);
+        const maxHeight = Math.max(getPageImageHeight(draggedItem), 1);
+        const minHeight = Math.min(120, maxHeight);
+        const nextVisibleHeight = clamp(
+          (dragStartRef.current.originViewportHeight ?? draggedItem.visibleHeight) + dy / zoom,
+          minHeight,
+          maxHeight,
+        );
 
         updateItem(dragStartRef.current.id, (item) => {
           if (item.type !== 'page') {
@@ -1077,9 +1621,13 @@ export const Canvas = () => {
         const isLockedAspect = item.type === 'file' && (item.mimeType === 'application/pdf' || item.mimeType.startsWith('image/') || item.mimeType.startsWith('video/'));
 
         if (isLockedAspect) {
-          const ratio = (dragStartRef.current?.originWidth ?? item.width) / (dragStartRef.current?.originHeight ?? item.height);
+          const ratio = item.type === 'file' && item.mimeType.startsWith('image/') && item.imageRatio
+            ? item.imageRatio
+            : (dragStartRef.current?.originWidth ?? item.width) / (dragStartRef.current?.originHeight ?? item.height);
           const adjustedWidth = nextWidth;
-          const adjustedHeight = adjustedWidth / ratio;
+          const adjustedHeight = item.type === 'file' && item.mimeType.startsWith('image/') && item.imageRatio
+            ? (adjustedWidth - 12) / ratio + 12
+            : adjustedWidth / ratio;
 
           return {
             ...item,
@@ -1198,11 +1746,12 @@ export const Canvas = () => {
     const pointerY = event.clientY - rect.top;
 
     const zoomBefore = zoom;
-    const nextZoom = clamp(
-      zoomBefore * (event.deltaY < 0 ? 1.12 : 0.9),
-      MIN_ZOOM,
-      MAX_ZOOM,
-    );
+    const wheelDelta = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? event.deltaY * 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? event.deltaY * rect.height
+        : event.deltaY;
+    const nextZoom = clamp(zoomBefore * Math.exp(-wheelDelta * 0.0015), MIN_ZOOM, MAX_ZOOM);
 
     if (nextZoom === zoomBefore) {
       return;
@@ -1219,41 +1768,77 @@ export const Canvas = () => {
   };
 
   const capturePageImage = async (url: string) => {
-    try {
-      const base64 = await invoke<string>('capture_page', { url });
-      return `data:image/png;base64,${base64}`;
-    } catch (error) {
-      console.warn('No se pudo generar la captura local de la página:', error);
-      return null;
+    const base64 = (await invoke<string>('capture_page', { url })).trim();
+    if (!base64) {
+      throw new Error('El capturador devolvió una imagen vacía.');
     }
+
+    return `data:image/jpeg;base64,${base64}`;
   };
 
-  const handlePageCommit = async (id: string) => {
-    const rawValue = (pageDrafts[id] ?? '').trim();
+  const handlePageCommit = async (id: string, draft?: string) => {
+    const rawValue = (draft ?? pageDrafts[id] ?? '').trim();
     if (!rawValue) {
       return;
     }
 
     const normalized = /^https?:\/\//i.test(rawValue) ? rawValue : `https://${rawValue}`;
+    pageCaptureAttemptedUrlsRef.current.set(id, normalized);
     setPageLoadingIds((current) => ({ ...current, [id]: true }));
+    setPageCaptureErrors((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
 
     try {
-      const captureUrl = await capturePageImage(normalized);
+      let captureUrl: string | null = null;
+      let captureError = '';
 
-      updateItem(id, (item) => ({
-        ...item,
-        type: 'page',
-        url: normalized,
-        title: 'Página web',
-        captureUrl: captureUrl ?? undefined,
-        scale: item.type === 'page' ? item.scale || 1 : 1,
-        visibleHeight: item.type === 'page' ? item.visibleHeight || item.height : item.height,
-      }));
+      try {
+        captureUrl = await capturePageImage(normalized);
+      } catch (error) {
+        captureError = error instanceof Error ? error.message : String(error);
+        console.error('No se pudo generar la captura local de la página:', error);
+      }
+
+      updateItem(id, (item) => {
+        const samePage = item.type === 'page' && item.url === normalized;
+        return {
+          ...item,
+          type: 'page',
+          url: normalized,
+          title: 'Página web',
+          captureUrl: captureUrl ?? (samePage ? item.captureUrl : undefined),
+          captureWidth: samePage && item.type === 'page' ? item.captureWidth : undefined,
+          captureHeight: samePage && item.type === 'page' ? item.captureHeight : undefined,
+          scale: samePage && item.type === 'page' ? item.scale || 1 : 1,
+          visibleHeight: samePage && item.type === 'page' ? item.visibleHeight || item.height : item.height,
+        };
+      });
+
+      if (captureError) {
+        setPageCaptureErrors((current) => ({ ...current, [id]: captureError.slice(0, 240) }));
+      }
     } finally {
       setPageLoadingIds((current) => ({ ...current, [id]: false }));
     }
   };
 
+  useEffect(() => {
+    items.forEach((item) => {
+      if (item.type !== 'page' || !item.url || item.captureUrl || pageLoadingIds[item.id]) {
+        return;
+      }
+
+      if (pageCaptureAttemptedUrlsRef.current.get(item.id) === item.url) {
+        return;
+      }
+
+      pageCaptureAttemptedUrlsRef.current.set(item.id, item.url);
+      void handlePageCommit(item.id, item.url);
+    });
+  }, [handlePageCommit, items, pageLoadingIds]);
   const toggleContainer = (id: string) => {
     setItems((current) => {
       const container = current.find(
@@ -1290,60 +1875,61 @@ export const Canvas = () => {
     });
   };
 
-  const renderFolderSummary = (item: FolderCanvasItem) => {
-    const children = items.filter((entry) => item.childIds.includes(entry.id)).slice(0, 4);
+  const renderFolderLabel = (item: FolderCanvasItem) => {
+    const itemCount = items.filter((entry) => item.childIds.includes(entry.id)).length;
 
     return (
-      <div className="folder-compact">
-        <div className="folder-layer folder-layer-back">
-          <img src={folderBackImage} alt="" />
-        </div>
-        {children.length > 0 && (
-          <div className="folder-compact-papers">
-            {children.map((child, index) => (
-              <div
-                key={child.id}
-                className="folder-compact-paper"
-                style={{
-                  transform: `translate(calc(-50% + ${(index - (children.length - 1) / 2) * 12}px), ${index * 5}px)`,
-                }}
-              >
-                {child.type === 'file' && child.mimeType.startsWith('image/') ? (
-                  <img src={child.previewUrl} alt={child.fileName} />
-                ) : (
-                  <>
-                    <strong>{child.title || 'Elemento'}</strong>
-                    <small>
-                      {child.type === 'note'
-                        ? child.text.slice(0, 42)
-                        : child.type === 'page'
-                          ? child.url.replace(/^https?:\/\//, '')
-                          : child.type === 'file'
-                            ? child.fileName
-                            : ''}
-                    </small>
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
+      <div
+        className="folder-label"
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          updateSelection([item.id]);
+          setRenamingFolderId(item.id);
+        }}
+      >
+        <small>{itemCount} {itemCount === 1 ? 'elemento' : 'elementos'}</small>
+        {renamingFolderId === item.id ? (
+          <input
+            className="folder-title-input"
+            aria-label="Título de la carpeta"
+            value={item.title}
+            placeholder="Título de la carpeta"
+            autoFocus
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => updateItem(item.id, (current) => current.type === 'folder' ? { ...current, title: event.target.value } : current)}
+            onBlur={() => setRenamingFolderId((current) => current === item.id ? null : current)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+              if (event.key === 'Escape') setRenamingFolderId(null);
+            }}
+          />
+        ) : (
+          <strong>{item.title || 'Carpeta'}</strong>
         )}
-        <div className="folder-layer folder-layer-front">
-          <img src={folderFrontImage} alt="" />
-        </div>
       </div>
     );
   };
 
-  const renderFolderExpanded = () => {
+  const renderFolderSummary = (item: FolderCanvasItem) => {
+
+    return (
+      <div className="folder-compact">
+        <div className="folder-layer folder-layer-back" style={{ color: item.color ?? DEFAULT_FOLDER_COLOR }} dangerouslySetInnerHTML={{ __html: folderBackSvg }} />
+        <div className="folder-layer folder-layer-front" style={{ color: item.color ?? DEFAULT_FOLDER_COLOR }} dangerouslySetInnerHTML={{ __html: folderFrontSvg }} />
+        {renderFolderLabel(item)}
+      </div>
+    );
+  };
+
+  const renderFolderExpanded = (item: FolderCanvasItem) => {
     return (
       <div className="folder-scene">
-        <div className="folder-layer folder-layer-back">
-          <img src={folderBackImage} alt="" />
-        </div>
-        <div className="folder-layer folder-layer-front">
-          <img src={folderFrontImage} alt="" />
-        </div>
+        <div className="folder-layer folder-layer-back" style={{ color: item.color ?? DEFAULT_FOLDER_COLOR }} dangerouslySetInnerHTML={{ __html: folderBackSvg }} />
+        <div className="folder-layer folder-layer-front" style={{ color: item.color ?? DEFAULT_FOLDER_COLOR }} dangerouslySetInnerHTML={{ __html: folderFrontSvg }} />
+        {renderFolderLabel(item)}
       </div>
     );
   };
@@ -1369,7 +1955,7 @@ export const Canvas = () => {
 
   const renderContainerExpanded = (item: GroupCanvasItem | FolderCanvasItem) => {
     if (item.type === 'folder') {
-      return renderFolderExpanded();
+      return renderFolderExpanded(item);
     }
 
     const children = items.filter((entry) => item.childIds.includes(entry.id));
@@ -1429,8 +2015,52 @@ export const Canvas = () => {
     }
 
     if (item.type === 'file') {
+      if (item.fileKind === 'social' && item.sourceUrl && !item.embedUrl) {
+        return (
+          <a className="canvas-social-card" href={item.sourceUrl} target="_blank" rel="noreferrer">
+            <span className="canvas-social-mark">𝕏</span>
+            <span><strong>Publicación de X</strong><small>{item.sourceUrl}</small></span>
+          </a>
+        );
+      }
+
+      if (item.embedUrl) {
+        return <iframe title={item.title} src={item.embedUrl} className="canvas-media canvas-embed-frame" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen />;
+      }
+
       if (item.mimeType.startsWith('image/')) {
-        return <img src={item.previewUrl} alt={item.fileName} className="canvas-media" />;
+        return (
+          <div className="canvas-image-frame">
+            <img
+              src={item.previewUrl}
+              alt={item.fileName}
+              className="canvas-media canvas-media-image"
+              onLoad={(event) => {
+                const { naturalWidth, naturalHeight } = event.currentTarget;
+                if (!naturalWidth || !naturalHeight || item.imageFrameInset === 12) return;
+                const imageRatio = naturalWidth / naturalHeight;
+                updateItem(item.id, (current) => {
+                  if (current.type !== 'file' || !current.mimeType.startsWith('image/') || current.imageFrameInset === 12) return current;
+                  const originalWidth = current.stackOriginalWidth ?? current.width;
+                  const originalHeight = current.stackOriginalHeight ?? current.height;
+                  const contentWidth = Math.min(Math.max(1, originalWidth - 12), Math.max(1, originalHeight - 12) * imageRatio);
+                  const width = contentWidth + 12;
+                  const height = contentWidth / imageRatio + 12;
+                  const stackScale = current.stackOriginalWidth ? current.width / current.stackOriginalWidth : 1;
+                  return {
+                    ...current,
+                    width: 12 + contentWidth * stackScale,
+                    height: 12 + (height - 12) * stackScale,
+                    stackOriginalWidth: current.stackOriginalWidth ? width : undefined,
+                    stackOriginalHeight: current.stackOriginalHeight ? height : undefined,
+                    imageRatio,
+                    imageFrameInset: 12,
+                  };
+                });
+              }}
+            />
+          </div>
+        );
       }
 
       if (item.mimeType.startsWith('video/')) {
@@ -1441,18 +2071,32 @@ export const Canvas = () => {
         return <audio src={item.previewUrl} controls className="canvas-media-audio" />;
       }
 
+      if (item.htmlContent) {
+        return <iframe title={item.fileName} srcDoc={item.htmlContent} sandbox="" className="canvas-media canvas-html-preview" />;
+      }
+
       if (item.mimeType === 'application/pdf') {
         return <iframe title={item.fileName} src={item.previewUrl} className="canvas-media pdf-frame" />;
       }
 
       if (item.mimeType.startsWith('text/') || item.fileName.toLowerCase().endsWith('.md') || item.fileName.toLowerCase().endsWith('.markdown')) {
-        return <pre className="canvas-markdown-preview">{item.textContent ?? 'Sin contenido'}</pre>;
+        const text = item.textContent ?? 'Sin contenido';
+        return item.fileName.toLowerCase().match(/\.(md|markdown)$/)
+          ? <article className="canvas-markdown-render" dangerouslySetInnerHTML={{ __html: renderMarkdownText(text) }} />
+          : <pre className="canvas-markdown-preview">{text}</pre>;
+      }
+
+      if (item.fileKind === 'document') {
+        return item.textContent
+          ? <article className="canvas-document-preview"><a href={item.previewUrl} download={item.fileName}>Descargar original</a><pre>{item.textContent}</pre></article>
+          : <div className="canvas-file-generic"><strong>{item.fileName}</strong><span>Documento de Word · {item.sizeLabel}</span><small>Vista previa del formato .doc no disponible</small><a href={item.previewUrl} download={item.fileName}>Descargar original</a></div>;
       }
 
       return (
         <div className="canvas-file-generic">
           <strong>{item.fileName}</strong>
           <span>{item.sizeLabel ?? 'Archivo adjunto'}</span>
+          <a href={item.previewUrl} download={item.fileName}>Descargar archivo</a>
         </div>
       );
     }
@@ -1480,7 +2124,7 @@ export const Canvas = () => {
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
-                void handlePageCommit(item.id);
+                void handlePageCommit(item.id, pageDrafts[item.id] ?? item.url);
                 setEditingId(null);
               }
             }}
@@ -1491,56 +2135,50 @@ export const Canvas = () => {
 
     if (!item.captureUrl && pageLoadingIds[item.id]) {
       return (
-        <div className="canvas-page-loading">
-          <span>Generando captura…</span>
+        <div className="canvas-page-state">
+          <span className="canvas-page-spinner" aria-hidden="true" />
+          <span>Capturando página…</span>
         </div>
       );
     }
 
     if (!item.captureUrl) {
       return (
-        <div className="canvas-page-loading canvas-page-loading-empty">
-          <span>Página sin captura</span>
+        <div className="canvas-page-state">
+          <span>No se pudo generar la captura</span>
+          {pageCaptureErrors[item.id] && <small title={pageCaptureErrors[item.id]}>{pageCaptureErrors[item.id]}</small>}
         </div>
       );
     }
 
     const viewportHeight = item.visibleHeight || item.height;
-    const contentScale = item.scale || 1;
+    const displayWidth = getPageImageWidth(item);
 
     return (
-      <div
-        className="canvas-page-capture-wrap"
-        style={{
-          width: item.width,
-          height: viewportHeight,
-        }}
-      >
-        <div
-          className="canvas-page-capture"
-          style={{
-            width: item.width,
-            height: viewportHeight,
-            overflow: 'hidden',
-            borderRadius: '8px',
-            transform: `scale(${contentScale})`,
-            transformOrigin: 'top center',
+      <div className="canvas-page-preview" style={{ height: viewportHeight }}>
+        <img
+          src={item.captureUrl}
+          alt={`Captura de ${getUrlHost(item.url)}`}
+          className="canvas-page-capture-image"
+          draggable={false}
+          style={{ width: displayWidth }}
+          onLoad={(event) => {
+            const { naturalWidth, naturalHeight } = event.currentTarget;
+            if (!naturalWidth || !naturalHeight || (item.captureWidth === naturalWidth && item.captureHeight === naturalHeight)) return;
+            updateItem(item.id, (current) => {
+              if (current.type !== 'page' || current.captureUrl !== item.captureUrl) return current;
+              const fullHeight = displayWidth * naturalHeight / naturalWidth;
+              const visibleHeight = Math.min(current.visibleHeight || current.height, fullHeight);
+              return {
+                ...current,
+                captureWidth: naturalWidth,
+                captureHeight: naturalHeight,
+                height: visibleHeight,
+                visibleHeight,
+              };
+            });
           }}
-        >
-          <img
-            src={item.captureUrl}
-            alt={item.title}
-            className="canvas-page-capture-image"
-            loading="lazy"
-            style={{
-              width: '100%',
-              height: 'auto',
-              display: 'block',
-              objectFit: 'cover',
-              objectPosition: 'top center',
-            }}
-          />
-        </div>
+        />
       </div>
     );
   };
@@ -1550,6 +2188,7 @@ export const Canvas = () => {
       item.type !== 'group' &&
       !items.some((entry) => entry.type === 'folder' && !entry.expanded && entry.childIds.includes(item.id)),
   );
+  const contextMenuItem = contextMenu ? items.find((item) => item.id === contextMenu.id) : undefined;
 
   return (
     <div
@@ -1560,6 +2199,8 @@ export const Canvas = () => {
       onMouseUp={(event) => stopInteraction(event)}
       onMouseLeave={() => stopInteraction()}
       onWheel={handleWheel}
+      onPaste={handleCanvasPaste}
+      tabIndex={0}
       onContextMenu={(event) => {
         event.preventDefault();
         const target = event.target as HTMLElement;
@@ -1590,6 +2231,18 @@ export const Canvas = () => {
         setContextMenu(null);
         collapseAllGroups();
       }}
+      onDoubleClick={(event) => {
+        const target = event.target as HTMLElement;
+        if (!target.closest('.canvas-surface') || target.closest('.canvas-item')) return;
+
+        const bounds = viewportRef.current?.getBoundingClientRect();
+        if (!bounds) return;
+        const worldX = (event.clientX - bounds.left - pan.x) / zoom;
+        const worldY = (event.clientY - bounds.top - pan.y) / zoom;
+        window.dispatchEvent(new CustomEvent('canvas-create-note', {
+          detail: { x: worldX - 110, y: worldY - 75 },
+        }));
+      }}
       aria-label="Infinite canvas"
       role="presentation"
     >
@@ -1599,7 +2252,6 @@ export const Canvas = () => {
         multiple
         className="sr-only-input"
         onChange={handleFiles}
-        accept="image/*,video/*,audio/*,.pdf,.md,.markdown,.txt,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.json,.xml,.html,.css,.js,.ts,.tsx,.jsx,.py,.java,.c,.cpp,.php,.rtf"
       />
 
       <input
@@ -1608,6 +2260,38 @@ export const Canvas = () => {
         className="sr-only-input"
         onChange={handleProjectImport}
         accept=".osp,application/json"
+      />
+
+      <LayerBar
+        items={items}
+        selectedIds={selectedIds}
+        isOpen={layerBarOpen}
+        onToggle={() => setLayerBarOpen((current) => !current)}
+        onSelect={(id, additive) => {
+          if (!additive) {
+            updateSelection([id]);
+            return;
+          }
+
+          updateSelection(
+            selectedIds.includes(id)
+              ? selectedIds.filter((selectedId) => selectedId !== id)
+              : [...selectedIds, id],
+          );
+        }}
+        onReorder={reorderLayers}
+        onMoveSelected={moveSelectedLayer}
+        onDeleteSelected={() => {
+          if (selectedIds.length === 0) {
+            return;
+          }
+
+          const idsToDelete = [...selectedIds];
+          setItems((current) => current.filter((item) => !idsToDelete.includes(item.id)));
+          updateSelection([]);
+          setEditingId(null);
+          setContextMenu(null);
+        }}
       />
 
       {canvasSettingsOpen && (
@@ -1645,7 +2329,10 @@ export const Canvas = () => {
           </div>
 
           <button type="button" onClick={() => { saveCanvasProject(); setFileSettingsOpen(false); }}>
-            Guardar proyecto (.osp)
+            Guardar en este dispositivo
+          </button>
+          <button type="button" onClick={() => { exportCanvasProject(); setFileSettingsOpen(false); }}>
+            Exportar copia (.osp)
           </button>
           <button type="button" onClick={() => { projectInputRef.current?.click(); setFileSettingsOpen(false); }}>
             Abrir proyecto (.osp)
@@ -1655,10 +2342,43 @@ export const Canvas = () => {
 
       {contextMenu && (
         <div
-          className="canvas-context-menu"
+          className={`canvas-context-menu ${contextMenuItem?.type === 'folder' ? 'folder-context-menu' : ''}`}
           style={{ left: contextMenu.x, top: contextMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
           onClick={(event) => event.stopPropagation()}
         >
+          {contextMenuItem?.type === 'folder' && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setRenamingFolderId(contextMenu.id);
+                  setContextMenu(null);
+                }}
+              >
+                Cambiar título
+              </button>
+              <div className="folder-context-colors" role="group" aria-label="Color de carpeta">
+                {FOLDER_COLORS.map((color) => (
+                  <button
+                    key={color.value}
+                    type="button"
+                    className={(contextMenuItem.color ?? DEFAULT_FOLDER_COLOR) === color.value ? 'active' : ''}
+                    style={{ '--swatch-color': color.value } as React.CSSProperties}
+                    aria-label={color.label}
+                    aria-pressed={(contextMenuItem.color ?? DEFAULT_FOLDER_COLOR) === color.value}
+                    title={color.label}
+                    onClick={() => {
+                      updateItem(contextMenuItem.id, (item) => item.type === 'folder' ? { ...item, color: color.value } : item);
+                      setContextMenu(null);
+                    }}
+                  >
+                    <span />
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <button type="button" onClick={() => removeItem(contextMenu.id)}>
             Eliminar
           </button>
@@ -1669,35 +2389,33 @@ export const Canvas = () => {
         className="canvas-surface"
         style={{
           background: canvasBackground,
-          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transform: `translate(${pan.x}px, ${pan.y}px)`,
           boxShadow: canvasGridEnabled ? 'inset 0 0 0 1px rgba(15, 23, 42, 0.04)' : 'none',
         }}
       >
-        <div className="canvas-content">
+        <div className="canvas-content" style={{ zoom }}>
           {visibleItems.map((item) => {
             const parentFolder = items.find(
               (entry): entry is FolderCanvasItem =>
                 entry.type === 'folder' && entry.expanded && entry.childIds.includes(item.id),
             );
+            const parentGroup = items.find(
+              (entry): entry is GroupCanvasItem => entry.type === 'group' && entry.childIds.includes(item.id),
+            );
             const isFolderPreview = Boolean(parentFolder);
-            const folderChildIndex = parentFolder?.childIds.indexOf(item.id) ?? -1;
-            const folderChildCount = parentFolder?.childIds.length ?? 0;
-            const folderChildMiddle = (folderChildCount - 1) / 2;
-            const folderChildRotation =
-              folderChildCount > 1 ? ((folderChildIndex - folderChildMiddle) / folderChildMiddle) * 11 : 0;
+            const isGroupStackChild = Boolean(parentGroup && !parentGroup.expanded);
 
             return (
               <div
                 key={item.id}
                 data-item-id={item.id}
-                className={`canvas-item ${selectedIds.includes(item.id) ? 'selected' : ''} ${isContainerItem(item) ? 'canvas-container' : ''} ${item.type === 'folder' ? 'folder-item' : ''} ${isFolderPreview ? 'folder-expanded-child' : ''}`}
+                className={`canvas-item ${selectedIds.includes(item.id) ? 'selected' : ''} ${isContainerItem(item) ? 'canvas-container' : ''} ${item.type === 'folder' ? 'folder-item' : ''} ${item.type === 'page' ? 'page-item' : ''} ${item.type === 'file' && item.mimeType.startsWith('image/') ? 'image-item' : ''} ${isFolderPreview ? 'folder-expanded-child' : ''} ${isGroupStackChild ? 'group-stack-child' : ''}`}
                 style={{
                   left: item.x,
                   top: item.y,
-                  width: isFolderPreview ? 150 : item.width,
-                  height: isFolderPreview ? 96 : item.height,
+                  width: isFolderPreview ? 150 : item.type === 'page' ? getPageImageWidth(item) : item.width,
+                  height: isFolderPreview ? 96 : item.type === 'page' ? item.visibleHeight || item.height : item.height,
                   zIndex: isFolderPreview ? 4 : undefined,
-                  transform: isFolderPreview ? `rotate(${folderChildRotation}deg)` : undefined,
                 }}
                 onMouseDown={(event) => {
                   const parentGroup = items.find(
@@ -1779,6 +2497,10 @@ export const Canvas = () => {
                   }
 
                   if (item.type === 'folder') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    updateSelection([item.id]);
+                    setRenamingFolderId(item.id);
                     return;
                   }
 
@@ -1788,13 +2510,31 @@ export const Canvas = () => {
                   setEditingId(item.id);
                 }}
               >
+                {item.type === 'note' && !isFolderPreview && (
+                  <button
+                    type="button"
+                    className="canvas-note-maximize"
+                    aria-label="Abrir nota a pantalla completa"
+                    title="Abrir nota"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      updateSelection([item.id]);
+                      setEditingId(null);
+                      setFullscreenNoteClosing(false);
+                      setFullscreenNoteId(item.id);
+                    }}
+                  >
+                    <Maximize size={14} strokeWidth={1.7} />
+                  </button>
+                )}
                 <div className="canvas-item-body">{renderItemContent(item)}</div>
                 {item.type === 'page' ? (
                   <>
                     <div className="canvas-page-handle canvas-page-handle-right" onMouseDown={(event) => startPageResize(event, item.id, 'scale')} />
                     <div className="canvas-page-handle canvas-page-handle-bottom" onMouseDown={(event) => startPageResize(event, item.id, 'viewport')} />
                   </>
-                ) : !isContainerItem(item) ? (
+                ) : !isContainerItem(item) && !isGroupStackChild ? (
                   <div className="canvas-resize-handle" onMouseDown={(event) => startResize(event, item.id)} />
                 ) : null}
               </div>
@@ -1802,6 +2542,91 @@ export const Canvas = () => {
           })}
         </div>
       </div>
+      {fullscreenNoteId && (() => {
+        const note = items.find((item): item is NoteCanvasItem => item.id === fullscreenNoteId && item.type === 'note');
+        if (!note) return null;
+        return (
+          <section
+            className={`note-fullscreen ${fullscreenNoteClosing ? 'is-closing' : ''}`}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Editor de nota"
+            onMouseDown={(event) => event.stopPropagation()}
+            onAnimationEnd={() => {
+              if (fullscreenNoteClosing) {
+                setFullscreenNoteId(null);
+                setFullscreenNoteClosing(false);
+              }
+            }}
+          >
+            <header className="note-fullscreen-header">
+              <span>Nota</span>
+              <button type="button" aria-label="Cerrar nota" title="Cerrar" onClick={() => setFullscreenNoteClosing(true)}>
+                <Minimize size={16} strokeWidth={1.7} />
+              </button>
+            </header>
+            <div className="note-fullscreen-content">
+              <div
+                ref={fullscreenNoteEditorRef}
+                className="note-fullscreen-editor"
+                contentEditable
+                suppressContentEditableWarning
+                role="textbox"
+                aria-label="Nota en Markdown"
+                aria-multiline="true"
+                data-placeholder="Empieza a escribir…"
+                spellCheck
+                onInput={(event) => {
+                  const editor = event.currentTarget;
+                  const selection = window.getSelection();
+                  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+                  let caretOffset = 0;
+                  if (range) {
+                    const blocks = Array.from(editor.children);
+                    const activeBlockIndex = blocks.findIndex((block) => block === range.startContainer || block.contains(range.startContainer));
+                    if (activeBlockIndex >= 0) {
+                      caretOffset = blocks.slice(0, activeBlockIndex).reduce((length, block) => length + getEditorText(block).length + 1, 0);
+                      const beforeCaret = document.createRange();
+                      beforeCaret.selectNodeContents(blocks[activeBlockIndex]);
+                      beforeCaret.setEnd(range.startContainer, range.startOffset);
+                      caretOffset += getEditorText(beforeCaret.cloneContents()).length;
+                    } else if (range.startContainer === editor) {
+                      caretOffset = blocks.slice(0, range.startOffset).reduce((length, block) => length + getEditorText(block).length + 1, 0);
+                    } else {
+                      const beforeCaret = range.cloneRange();
+                      beforeCaret.selectNodeContents(editor);
+                      beforeCaret.setEnd(range.startContainer, range.startOffset);
+                      caretOffset = getEditorText(beforeCaret.cloneContents()).length;
+                    }
+                  }
+
+                  const markdown = markdownFromEditor(editor);
+                  updateItem(note.id, (current) => current.type === 'note' ? { ...current, text: markdown } : current);
+
+                  const inputEvent = event.nativeEvent as InputEvent;
+                  const isWhitespaceInput = inputEvent.inputType === 'insertText' && Boolean(inputEvent.data && /^\s+$/u.test(inputEvent.data));
+                  const textEndsInSpace = /[ \u00a0]$/.test(editor.textContent ?? '');
+                  if (isWhitespaceInput || textEndsInSpace || inputEvent.inputType === 'insertParagraph' || inputEvent.inputType === 'insertLineBreak') return;
+                  const renderedHtml = renderMarkdownText(markdown);
+                  const normalizeSpaces = (html: string) => html.replace(/&nbsp;|&#160;|\u00a0/gi, ' ');
+                  if (normalizeSpaces(editor.innerHTML) === normalizeSpaces(renderedHtml)) return;
+                  editor.innerHTML = renderedHtml;
+                  restoreEditorCaret(editor, caretOffset);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Tab') {
+                    event.preventDefault();
+                    document.execCommand('insertText', false, '  ');
+                  }
+                }}
+                onClick={(event) => {
+                  if ((event.target as HTMLElement).closest('a')) event.preventDefault();
+                }}
+              />
+            </div>
+          </section>
+        );
+      })()}
     </div>
   );
 };
