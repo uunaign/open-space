@@ -76,6 +76,14 @@ const renderMarkdownText = (value: string) => {
       continue;
     }
 
+    // Keep an empty heading trigger visible while editing so Backspace does not
+    // turn the marker into a heading's literal text or move the caret before it.
+    if (/^\s{0,3}#{1,3}[ \t]+$/.test(rawLine)) {
+      flushList();
+      html.push(`<p>${escapeHtml(rawLine)}</p>`);
+      continue;
+    }
+
     if (firstContentLine) {
       firstContentLine = false;
       if (!/^#{1,3}\s+/.test(trimmed)) {
@@ -676,6 +684,17 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
   }, [fullscreenNoteId]);
 
   useEffect(() => {
+    if (!renamingFolderId) return;
+    const confirmOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && target instanceof HTMLElement && target.closest('.folder-title-input')) return;
+      setRenamingFolderId((current) => current === renamingFolderId ? null : current);
+    };
+    window.addEventListener('pointerdown', confirmOnOutsidePointer, true);
+    return () => window.removeEventListener('pointerdown', confirmOnOutsidePointer, true);
+  }, [renamingFolderId]);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
       const isEditingText =
@@ -959,7 +978,9 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
       }
 
       const [draggedItem] = topToBottom.splice(draggedIndex, 1);
-      const insertIndex = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex;
+      // The target is the row the dragged item should cross. Removing the
+      // source already shifts later indexes, so insert at the target index.
+      const insertIndex = targetIndex;
       topToBottom.splice(insertIndex, 0, draggedItem);
       return topToBottom.reverse();
     });
@@ -1162,7 +1183,7 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
   const collapseAllGroups = () => {
     setItems((current) => {
       const next = current.map((item) => {
-        if (item.type === 'group') {
+        if ((item.type === 'group' || item.type === 'folder') && item.expanded) {
           return { ...item, expanded: false };
         }
 
@@ -1855,23 +1876,12 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
       if (container.type !== 'folder') {
         return current.map((item) => (item.id === id ? updatedContainer : item));
       }
-      const updatedFolder: FolderCanvasItem = { ...container, expanded };
-
-      return current.map((item) => {
-        if (item.id === id) {
-          return updatedFolder;
-        }
-
-        const index = container.childIds.indexOf(item.id);
-        if (index !== -1) {
-          return {
-            ...item,
-            ...getFolderChildPosition(updatedFolder, index, container.childIds.length, expanded),
-          };
-        }
-
-        return item;
+      const next = current.map((item) => {
+        if (item.type !== 'folder') return item;
+        if (item.id === id) return { ...item, expanded };
+        return expanded && item.expanded ? { ...item, expanded: false } : item;
       });
+      return repositionContainerChildren(next);
     });
   };
 
@@ -2225,6 +2235,13 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
 
         const target = event.target as HTMLElement;
         if (target.closest('.canvas-item')) {
+          const clickedItemId = target.closest<HTMLElement>('.canvas-item')?.dataset.itemId;
+          const clickedInsideExpandedFolder = items.some(
+            (item) => item.type === 'folder' && item.expanded &&
+              (item.id === clickedItemId || item.childIds.includes(clickedItemId ?? '')),
+          );
+          const clickedItem = items.find((item) => item.id === clickedItemId);
+          if (!clickedInsideExpandedFolder && clickedItem?.type !== 'folder') collapseAllGroups();
           return;
         }
 
@@ -2611,7 +2628,8 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
                   const normalizeSpaces = (html: string) => html.replace(/&nbsp;|&#160;|\u00a0/gi, ' ');
                   if (normalizeSpaces(editor.innerHTML) === normalizeSpaces(renderedHtml)) return;
                   editor.innerHTML = renderedHtml;
-                  restoreEditorCaret(editor, caretOffset);
+                  const emptyHeadingTrigger = markdown.match(/(?:^|\n)(#{1,3}[ \t]+)$/);
+                  restoreEditorCaret(editor, emptyHeadingTrigger ? caretOffset + emptyHeadingTrigger[1].length : caretOffset);
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Tab') {

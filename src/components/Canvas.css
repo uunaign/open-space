@@ -47,6 +47,7 @@
 
 .canvas-item {
   position: absolute;
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   background: var(--canvas-panel);
@@ -180,7 +181,7 @@
 
 .canvas-note-maximize {
   position: absolute;
-  z-index: 4;
+  z-index: 1;
   top: 7px;
   right: 7px;
   display: grid;
@@ -619,6 +620,7 @@ iframe {
   min-height: 0;
   overflow: hidden;
   background: #fff;
+  border: 1px solid rgba(17, 24, 39, 0.18);
 }
 
 .canvas-item.page-item {
@@ -696,16 +698,16 @@ iframe {
   position: absolute;
   z-index: 6;
   display: block;
-  background: rgba(255, 255, 255, 0.95);
-  border: 1px solid rgba(17, 24, 39, 0.2);
+  background: rgba(138, 138, 138, 0.541);
+  border: 1px solid rgba(17, 24, 39, 0.082);
   box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
 }
 
 .canvas-page-handle-right {
-  right: -8px;
+  right: 2px;
   top: 50%;
-  width: 14px;
-  height: 64px;
+  width: 6px;
+  height: 80px;
   transform: translateY(-50%);
   border-radius: 999px;
   cursor: ew-resize;
@@ -713,9 +715,9 @@ iframe {
 
 .canvas-page-handle-bottom {
   left: 50%;
-  bottom: -8px;
+  bottom: 2px;
   width: 80px;
-  height: 14px;
+  height: 5px;
   transform: translateX(-50%);
   border-radius: 999px;
   cursor: ns-resize;
@@ -786,8 +788,8 @@ iframe {
 
 .folder-label strong {
   color: #353940;
-  font-size: 0.76rem;
-  font-weight: 550;
+  font-size: 1.2rem;
+  font-weight: 600;
   line-height: 1.35;
 }
 
@@ -1068,19 +1070,26 @@ iframe {
 }
 
 .folder-context-colors {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(8, 20px);
   justify-content: space-between;
-  gap: 5px;
+  gap: 4px;
   margin: 4px 2px;
   padding: 9px 4px 5px;
   border-top: 1px solid rgba(17, 24, 39, 0.07);
 }
 
 .canvas-context-menu .folder-context-colors button {
-  flex: 0 0 20px;
-  width: 20px;
+  box-sizing: border-box;
+  flex: none;
+  width: 20px !important;
+  min-width: 20px;
+  max-width: 20px;
   height: 20px;
+  min-height: 20px;
   padding: 2px;
+  align-items: center;
+  justify-content: center;
   border: 1px solid transparent;
   border-radius: 50%;
   background: transparent;
@@ -1094,6 +1103,7 @@ iframe {
 
 .folder-context-colors button span {
   display: block;
+  box-sizing: border-box;
   width: 100%;
   height: 100%;
   border: 1px solid rgba(35, 42, 51, 0.1);

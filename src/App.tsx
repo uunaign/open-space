@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FileText, Plus } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { FileText, MoreHorizontal, Plus, FolderSearch, Pencil, Copy, Trash2, X } from 'lucide-react';
 import { Canvas, CanvasSnapshot } from './components/Canvas';
 import { ToolBar } from './components/ToolBar';
 import { TopMenuBar } from './components/TopMenuBar';
@@ -74,6 +76,8 @@ const listDocuments = () =>
 
 const putDocument = (document: CanvasDocument) =>
   withDocumentsStore('readwrite', (store) => store.put(document));
+const deleteDocument = (id: string) =>
+  withDocumentsStore('readwrite', (store) => store.delete(id));
 
 const createId = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -97,6 +101,12 @@ export function App() {
   const [activeDocument, setActiveDocument] = useState<CanvasDocument | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+  const [deleteTarget, setDeleteTarget] = useState<CanvasDocument | null>(null);
+  const [renameTarget, setRenameTarget] = useState<CanvasDocument | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [skipDeleteConfirmation, setSkipDeleteConfirmation] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -170,6 +180,75 @@ export function App() {
     setActiveDocument(null);
   };
 
+  const renameCanvas = async (document: CanvasDocument) => {
+    setOpenMenuId(null);
+    setRenameValue(document.title);
+    setRenameTarget(document);
+  };
+
+  const commitRenameCanvas = async () => {
+    if (!renameTarget) return;
+    const title = renameValue.trim();
+    if (!title) return;
+    if (title === renameTarget.title) { setRenameTarget(null); return; }
+    const document = renameTarget;
+    const renamed = { ...document, title, updatedAt: new Date().toISOString() };
+    try {
+      await putDocument(renamed);
+      setDocuments((current) => current.map((item) => item.id === document.id ? renamed : item));
+      setRenameTarget(null);
+    } catch { setErrorMessage('No se pudo renombrar el canvas.'); }
+  };
+
+  const duplicateCanvas = async (document: CanvasDocument) => {
+    const now = new Date().toISOString();
+    const duplicate = { ...document, id: createId(), title: `${document.title} (copia)`, createdAt: now, updatedAt: now };
+    try {
+      await putDocument(duplicate);
+      setDocuments((current) => [duplicate, ...current]);
+      setOpenMenuId(null);
+    } catch { setErrorMessage('No se pudo duplicar el canvas.'); }
+  };
+
+  const removeCanvas = async (document: CanvasDocument) => {
+    try {
+      await deleteDocument(document.id);
+      setDocuments((current) => current.filter((item) => item.id !== document.id));
+      setOpenMenuId(null);
+      await invoke('delete_canvas_file', { id: document.id });
+    } catch { setErrorMessage('El canvas se eliminó de recientes, pero no se pudo borrar su archivo local.'); }
+  };
+
+  const requestDeleteCanvas = (document: CanvasDocument) => {
+    setOpenMenuId(null);
+    if (localStorage.getItem('open-space-skip-delete-confirmation') === 'true') {
+      void removeCanvas(document);
+      return;
+    }
+    setSkipDeleteConfirmation(false);
+    setDeleteTarget(document);
+  };
+
+  const confirmDeleteCanvas = () => {
+    if (!deleteTarget) return;
+    if (skipDeleteConfirmation) localStorage.setItem('open-space-skip-delete-confirmation', 'true');
+    const document = deleteTarget;
+    setDeleteTarget(null);
+    void removeCanvas(document);
+  };
+
+  const findInExplorer = async (document: CanvasDocument) => {
+    try {
+      const contents = JSON.stringify(document.snapshot ?? { version: 1, items: [] }, null, 2);
+      const path = await invoke<string>('reveal_canvas_file', { id: document.id, contents });
+      await revealItemInDir(path);
+      setOpenMenuId(null);
+    } catch (error) {
+      console.error('No se pudo abrir el canvas en el explorador:', error);
+      setErrorMessage('No se pudo mostrar el canvas en el explorador.');
+    }
+  };
+
   useEffect(() => {
     const handleGlobalShortcuts = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'n') {
@@ -194,6 +273,15 @@ export function App() {
     window.addEventListener('keydown', handleGlobalShortcuts);
     return () => window.removeEventListener('keydown', handleGlobalShortcuts);
   }, [activeDocument, createCanvas]);
+
+  useEffect(() => {
+    if (!deleteTarget && !renameTarget) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setDeleteTarget(null); setRenameTarget(null); }
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [deleteTarget, renameTarget]);
 
   if (isLoading) {
     return <main className="home-screen home-loading" aria-busy="true" />;
@@ -249,6 +337,7 @@ export function App() {
                 </li>
                 {documents.map((document) => (
                   <li key={document.id}>
+                    <div className="canvas-card-wrap" onContextMenu={(event) => { event.preventDefault(); setOpenMenuId(document.id); setMenuPosition({ x: Math.min(event.clientX, window.innerWidth - 220), y: Math.min(event.clientY, window.innerHeight - 190) }); }}>
                     <button
                       className="canvas-card"
                       type="button"
@@ -265,12 +354,41 @@ export function App() {
                         <span>{formatDate(document.updatedAt)}</span>
                       </span>
                     </button>
+                    <button className="canvas-menu-trigger" type="button" aria-label={`Opciones de ${document.title}`} aria-haspopup="menu" aria-expanded={openMenuId === document.id} onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); const opening = openMenuId !== document.id; setOpenMenuId(opening ? document.id : null); setMenuPosition({ x: Math.min(rect.right - 205, window.innerWidth - 220), y: rect.bottom + 6 }); }}>
+                      <MoreHorizontal size={18} />
+                    </button>
+                    {openMenuId === document.id && <div className="canvas-context-menu" style={{ left: menuPosition.x, top: menuPosition.y }} role="menu" onClick={(event) => event.stopPropagation()}>
+                      <button role="menuitem" onClick={() => void findInExplorer(document)}><FolderSearch size={15} />Buscar en el explorador</button>
+                      <button role="menuitem" onClick={() => void renameCanvas(document)}><Pencil size={15} />Renombrar</button>
+                      <button role="menuitem" onClick={() => void duplicateCanvas(document)}><Copy size={15} />Duplicar</button>
+                      <div className="menu-divider" />
+                      <button className="menu-danger" role="menuitem" onClick={() => requestDeleteCanvas(document)}><Trash2 size={15} />Eliminar</button>
+                    </div>}
+                    </div>
                   </li>
                 ))}
               </ul>
             </section>
           )}
         </div>
+        {deleteTarget && <div className="home-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteTarget(null); }}>
+          <section className="home-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-description">
+            <div className="home-dialog-icon"><Trash2 size={18} /></div>
+            <button className="home-dialog-close" type="button" aria-label="Cerrar" onClick={() => setDeleteTarget(null)}><X size={17} /></button>
+            <h2 id="delete-dialog-title">¿Eliminar este canvas?</h2>
+            <p id="delete-dialog-description"><strong>{deleteTarget.title}</strong> se eliminará de forma permanente junto con su archivo local.</p>
+            <label className="home-dialog-check"><input type="checkbox" checked={skipDeleteConfirmation} onChange={(event) => setSkipDeleteConfirmation(event.target.checked)} /><span>No volver a mostrar</span></label>
+            <div className="home-dialog-actions"><button type="button" className="dialog-cancel" onClick={() => setDeleteTarget(null)}>Cancelar</button><button type="button" className="dialog-confirm" onClick={confirmDeleteCanvas}>Eliminar canvas</button></div>
+          </section>
+        </div>}
+        {renameTarget && <div className="home-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setRenameTarget(null); }}>
+          <section className="home-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title">
+            <button className="home-dialog-close" type="button" aria-label="Cerrar" onClick={() => setRenameTarget(null)}><X size={17} /></button>
+            <h2 id="rename-dialog-title" className="rename-dialog-title">Renombrar canvas</h2>
+            <input className="home-dialog-input" autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void commitRenameCanvas(); }} maxLength={80} />
+            <div className="home-dialog-actions"><button type="button" className="dialog-cancel" onClick={() => setRenameTarget(null)}>Cancelar</button><button type="button" className="dialog-confirm" onClick={() => void commitRenameCanvas()} disabled={!renameValue.trim()}>Guardar</button></div>
+          </section>
+        </div>}
       </main>
     );
   }

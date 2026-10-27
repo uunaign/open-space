@@ -23,6 +23,31 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
+fn reveal_canvas_file(app: tauri::AppHandle, id: String, contents: String) -> Result<String, String> {
+    if id.is_empty() || !id.chars().all(|character| character.is_ascii_alphanumeric() || character == '-') {
+        return Err("Identificador de canvas no válido.".to_string());
+    }
+    let directory = app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("canvases");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join(format!("{id}.osp"));
+    std::fs::write(&path, contents).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn delete_canvas_file(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    if id.is_empty() || !id.chars().all(|character| character.is_ascii_alphanumeric() || character == '-') {
+        return Err("Identificador de canvas no válido.".to_string());
+    }
+    let path = app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("canvases").join(format!("{id}.osp"));
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
 fn capture_page(app: tauri::AppHandle, url: String) -> Result<String, String> {
     let url = url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -84,7 +109,7 @@ fn capture_page(app: tauri::AppHandle, url: String) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, capture_page])
+        .invoke_handler(tauri::generate_handler![greet, capture_page, reveal_canvas_file, delete_canvas_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

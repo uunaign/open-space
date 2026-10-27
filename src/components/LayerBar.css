@@ -9,7 +9,7 @@
 
 .layerbar-shell {
   overflow: hidden;
-  padding: 5px 6px;
+  padding: 6px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 28px;
   background-color: rgba(23, 23, 23, 0.84);
@@ -19,8 +19,8 @@
 }
 
 .layerbar-shell.expanded {
-  border-radius: 24px;
-  background-color: rgba(23, 23, 23, 0.9);
+  border-radius: 0 25px 50px -12px rgba(0, 0, 0, 0.2);
+  box-shadow: none;
 }
 
 .layerbar-container {
@@ -105,6 +105,7 @@
 .layer-bar-content {
   min-height: 0;
   overflow: hidden;
+  overflow-x: hidden;
 }
 
 .layer-list {
@@ -112,8 +113,9 @@
   max-height: min(40vh, 320px);
   flex-direction: column;
   overflow-y: auto;
+  overflow-x: hidden;
   margin: 0;
-  padding: 0 4px 6px;
+  padding: 0 0 6px;
   list-style: none;
   scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
   scrollbar-width: thin;
@@ -121,20 +123,32 @@
 
 .layer-list-item {
   display: flex;
+  width: 100%;
+  box-sizing: border-box;
   min-width: 0;
   align-items: center;
-  gap: 6px;
-  padding: 3px 2px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
-  transition: border-color 160ms ease;
+  gap: 3px;
+  padding: 2px 10px 2px 2px;
+  border: 0;
+  border-radius: 9999px;
+  transition: background-color 160ms ease;
+  will-change: transform;
 }
 
 .layer-list-item:last-child {
-  border-bottom-color: transparent;
+  margin-bottom: 0;
 }
 
 .layer-list-item.drop-target {
-  border-bottom-color: rgba(147, 197, 253, 0.85);
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.layer-list-item.is-selected {
+  background-color: rgba(255, 255, 255, 0.055);
+}
+
+.layer-list-item.is-dragging {
+  opacity: 0.58;
 }
 
 .layer-drag-handle {
@@ -142,14 +156,16 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 38px;
+  width: 18px;
+  height: 30px;
   padding: 0;
   border: 0;
   background: transparent;
   color: #737373;
   cursor: grab;
-  touch-action: manipulation;
+  touch-action: none;
+  user-select: none;
+  border-radius: 9999px;
 }
 
 .layer-drag-handle:hover {
@@ -163,6 +179,7 @@
 .layer-list-item-select {
   display: flex;
   flex: 1;
+  width: 0;
   min-width: 0;
   align-items: center;
   gap: 10px;
@@ -242,6 +259,7 @@
   color: #a3a3a3;
   font-size: 13px;
   text-align: center;
+  font-family: "Inter", sans-serif;
 }
 
 @media (prefers-reduced-motion: reduce) {

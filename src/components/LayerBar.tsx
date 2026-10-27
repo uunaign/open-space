@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     FileText,
@@ -90,6 +90,36 @@ export const LayerBar = ({
 }: LayerBarProps) => {
     const [draggedId, setDraggedId] = useState<string | null>(null);
     const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+    const listItemRefs = useRef(new Map<string, HTMLLIElement>());
+    const lastDropTargetRef = useRef<string | null>(null);
+    const activePointerRef = useRef<{ id: string; pointerId: number } | null>(null);
+
+    const reorderWithAnimation = (sourceId: string, targetId: string) => {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            onReorder(sourceId, targetId);
+            return;
+        }
+        const previousRects = new Map<string, DOMRect>();
+        listItemRefs.current.forEach((element, id) => previousRects.set(id, element.getBoundingClientRect()));
+        onReorder(sourceId, targetId);
+
+        requestAnimationFrame(() => {
+            listItemRefs.current.forEach((element, id) => {
+                const previous = previousRects.get(id);
+                if (!previous) return;
+                const current = element.getBoundingClientRect();
+                const offsetY = previous.top - current.top;
+                if (Math.abs(offsetY) < 1) return;
+                element.style.transition = 'none';
+                element.style.transform = `translateY(${offsetY}px)`;
+                void element.offsetHeight;
+                requestAnimationFrame(() => {
+                    element.style.transition = 'transform 180ms cubic-bezier(0.2, 0, 0, 1)';
+                    element.style.transform = '';
+                });
+            });
+        });
+    };
 
     return createPortal(
         <div
@@ -112,40 +142,13 @@ export const LayerBar = ({
                                 {[...items].reverse().map((item) => (
                                     <li
                                         key={item.id}
-                                        className={`layer-list-item ${dropTargetId === item.id ? 'drop-target' : ''}`}
-                                        onDragOver={(event) => {
-                                            event.preventDefault();
-                                            setDropTargetId(item.id);
-                                            event.dataTransfer.dropEffect = 'move';
+                                        ref={(element) => {
+                                            if (element) listItemRefs.current.set(item.id, element);
+                                            else listItemRefs.current.delete(item.id);
                                         }}
-                                        onDrop={(event) => {
-                                            event.preventDefault();
-                                            const sourceId = draggedId ?? event.dataTransfer.getData('text/plain');
-                                            if (sourceId && sourceId !== item.id) {
-                                                onReorder(sourceId, item.id);
-                                            }
-                                            setDraggedId(null);
-                                            setDropTargetId(null);
-                                        }}
+                                        data-layer-id={item.id}
+                                        className={`layer-list-item ${selectedIds.includes(item.id) ? 'is-selected' : ''} ${dropTargetId === item.id ? 'drop-target' : ''} ${draggedId === item.id ? 'is-dragging' : ''}`}
                                     >
-                                        <button
-                                            type="button"
-                                            className="layer-drag-handle"
-                                            title={`Reordenar ${item.title || 'elemento'}`}
-                                            aria-label={`Arrastrar para reordenar ${item.title || 'elemento'}`}
-                                            draggable
-                                            onDragStart={(event) => {
-                                                setDraggedId(item.id);
-                                                event.dataTransfer.effectAllowed = 'move';
-                                                event.dataTransfer.setData('text/plain', item.id);
-                                            }}
-                                            onDragEnd={() => {
-                                                setDraggedId(null);
-                                                setDropTargetId(null);
-                                            }}
-                                        >
-                                            <GripVertical size={16} />
-                                        </button>
                                         <button
                                             type="button"
                                             className={`layer-list-item-select ${selectedIds.includes(item.id) ? 'selected' : ''}`}
@@ -158,8 +161,52 @@ export const LayerBar = ({
                                             </span>
                                             <span className="layer-list-item-copy">
                                                 <span className="layer-list-item-title">{item.title || 'Elemento'}</span>
-                                                <span className="layer-list-item-type">{typeLabels[item.type] || item.type}</span>
                                             </span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="layer-drag-handle"
+                                            title={`Reordenar ${item.title || 'elemento'}`}
+                                            aria-label={`Arrastrar para reordenar ${item.title || 'elemento'}`}
+                                            onPointerDown={(event) => {
+                                                if (event.button !== 0) return;
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                activePointerRef.current = { id: item.id, pointerId: event.pointerId };
+                                                lastDropTargetRef.current = item.id;
+                                                setDraggedId(item.id);
+                                                event.currentTarget.setPointerCapture(event.pointerId);
+                                            }}
+                                            onPointerMove={(event) => {
+                                                const activePointer = activePointerRef.current;
+                                                if (!activePointer || activePointer.pointerId !== event.pointerId) return;
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-layer-id]');
+                                                const targetId = target?.dataset.layerId;
+                                                if (targetId && targetId !== activePointer.id && lastDropTargetRef.current !== targetId) {
+                                                    lastDropTargetRef.current = targetId;
+                                                    setDropTargetId(targetId);
+                                                    reorderWithAnimation(activePointer.id, targetId);
+                                                }
+                                            }}
+                                            onPointerUp={(event) => {
+                                                event.stopPropagation();
+                                                if (activePointerRef.current?.pointerId === event.pointerId) {
+                                                    activePointerRef.current = null;
+                                                }
+                                                setDraggedId(null);
+                                                setDropTargetId(null);
+                                                lastDropTargetRef.current = null;
+                                            }}
+                                            onPointerCancel={() => {
+                                                activePointerRef.current = null;
+                                                setDraggedId(null);
+                                                setDropTargetId(null);
+                                                lastDropTargetRef.current = null;
+                                            }}
+                                        >
+                                            <GripVertical size={14} />
                                         </button>
                                     </li>
                                 ))}
