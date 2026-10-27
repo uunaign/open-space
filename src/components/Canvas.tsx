@@ -562,6 +562,13 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
   const [isDragging, setIsDragging] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [items, setItems] = useState<CanvasItem[]>(initialSnapshot?.items ?? []);
+  const historyRef = useRef({
+    past: [] as CanvasItem[][],
+    future: [] as CanvasItem[][],
+    stableItems: initialSnapshot?.items ?? [],
+    timer: null as number | null,
+    restoring: false,
+  });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -589,6 +596,84 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
   const centerAnimationRef = useRef<number | null>(null);
   const hasMovedItemRef = useRef(false);
   const pageCaptureAttemptedUrlsRef = useRef(new Map<string, string>());
+  const containerAnimationLockRef = useRef(false);
+
+  const publishHistoryState = (canUndo: boolean, canRedo: boolean) => {
+    window.dispatchEvent(new CustomEvent('canvas-history-state', { detail: { canUndo, canRedo } }));
+  };
+
+  const undoCanvas = () => {
+    const history = historyRef.current;
+    if (history.timer !== null) {
+      window.clearTimeout(history.timer);
+      history.timer = null;
+    }
+
+    const hasPendingChange = history.stableItems !== items;
+    const previousItems = hasPendingChange ? history.stableItems : history.past.pop();
+    if (!previousItems) return;
+
+    history.future.push(items);
+    history.stableItems = previousItems;
+    history.restoring = true;
+    setItems(previousItems);
+    publishHistoryState(history.past.length > 0, true);
+  };
+
+  const redoCanvas = () => {
+    const history = historyRef.current;
+    const nextItems = history.future.pop();
+    if (!nextItems) return;
+
+    if (history.timer !== null) {
+      window.clearTimeout(history.timer);
+      history.timer = null;
+    }
+    history.past.push(items);
+    history.stableItems = nextItems;
+    history.restoring = true;
+    setItems(nextItems);
+    publishHistoryState(true, history.future.length > 0);
+  };
+
+  useEffect(() => {
+    const history = historyRef.current;
+    if (history.restoring) {
+      history.restoring = false;
+      history.stableItems = items;
+      publishHistoryState(history.past.length > 0, history.future.length > 0);
+      return;
+    }
+    if (history.stableItems === items) return;
+
+    if (history.timer !== null) window.clearTimeout(history.timer);
+    history.future = [];
+    publishHistoryState(true, false);
+    history.timer = window.setTimeout(() => {
+      if (history.stableItems !== items) {
+        history.past.push(history.stableItems);
+        if (history.past.length > 100) history.past.shift();
+        history.stableItems = items;
+      }
+      history.timer = null;
+      publishHistoryState(history.past.length > 0, history.future.length > 0);
+    }, 400);
+  }, [items]);
+
+  useEffect(() => () => {
+    if (historyRef.current.timer !== null) window.clearTimeout(historyRef.current.timer);
+  }, []);
+
+  useEffect(() => {
+    const handleUndo = () => undoCanvas();
+    const handleRedo = () => redoCanvas();
+    window.addEventListener('canvas-undo', handleUndo);
+    window.addEventListener('canvas-redo', handleRedo);
+    return () => {
+      window.removeEventListener('canvas-undo', handleUndo);
+      window.removeEventListener('canvas-redo', handleRedo);
+    };
+  }, [items]);
 
   const readFileAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -759,6 +844,19 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
       }
 
       if (isEditingText) {
+        return;
+      }
+
+      if (isModifierPressed && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redoCanvas();
+        else undoCanvas();
+        return;
+      }
+
+      if (isModifierPressed && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redoCanvas();
         return;
       }
 
@@ -1031,20 +1129,20 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
     setSelectedId(nextIds[nextIds.length - 1] ?? null);
   };
 
-  const reorderLayers = (draggedId: string, targetId: string) => {
+  const reorderLayers = (draggedId: string, targetId: string, placement: 'before' | 'after' = 'before') => {
     setItems((current) => {
       const topToBottom = [...current].reverse();
       const draggedIndex = topToBottom.findIndex((item) => item.id === draggedId);
       const targetIndex = topToBottom.findIndex((item) => item.id === targetId);
 
-      if (draggedIndex === -1 || targetIndex === -1) {
+      if (draggedIndex === -1 || targetIndex === -1 || draggedId === targetId) {
         return current;
       }
 
       const [draggedItem] = topToBottom.splice(draggedIndex, 1);
-      // The target is the row the dragged item should cross. Removing the
-      // source already shifts later indexes, so insert at the target index.
-      const insertIndex = targetIndex;
+      // Layer rows are displayed top to bottom, so placement follows that order.
+      const adjustedTargetIndex = topToBottom.findIndex((item) => item.id === targetId);
+      const insertIndex = adjustedTargetIndex + (placement === 'after' ? 1 : 0);
       topToBottom.splice(insertIndex, 0, draggedItem);
       return topToBottom.reverse();
     });
@@ -1133,11 +1231,7 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
     if (selectedIds.length === 1) {
       const selectedGroup = items.find((item): item is GroupCanvasItem => item.id === selectedIds[0] && item.type === 'group');
       if (selectedGroup) {
-        if (selectedGroup.expanded) {
-          collapseGroup(selectedGroup.id);
-        } else {
-          toggleGroup(selectedGroup.id);
-        }
+        toggleGroup(selectedGroup.id);
         return;
       }
     }
@@ -1184,77 +1278,152 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
   };
 
   const toggleGroup = (groupId: string) => {
-    const group = items.find((item): item is GroupCanvasItem => item.id === groupId && item.type === 'group');
-    if (!group) {
-      return;
+    toggleContainer(groupId);
+  };
+
+  const getCanvasItemElements = (): Map<string, HTMLElement> => {
+    const elements = new Map<string, HTMLElement>();
+    viewportRef.current?.querySelectorAll<HTMLElement>('.canvas-item[data-item-id]').forEach((element) => {
+      const id = element.dataset.itemId;
+      if (id) elements.set(id, element);
+    });
+    return elements;
+  };
+
+  const getCanvasItemRects = (): Map<string, DOMRect> => {
+    const rects = new Map<string, DOMRect>();
+    getCanvasItemElements().forEach((element, id) => rects.set(id, element.getBoundingClientRect()));
+    return rects;
+  };
+
+  const animateBetweenRects = (
+    element: HTMLElement,
+    from: DOMRect,
+    to: DOMRect,
+    opacity: [number, number] = [1, 1],
+    delay = 0,
+    coordinateScale = 1,
+  ) => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || to.width <= 0 || to.height <= 0) {
+      return Promise.resolve();
     }
+    element.getAnimations().forEach((animation) => animation.cancel());
+    const scale = Math.max(0.01, coordinateScale);
+    const transform = `translate(${(from.left - to.left) / scale}px, ${(from.top - to.top) / scale}px) scale(${from.width / to.width}, ${from.height / to.height})`;
+    const animation = element.animate(
+      [
+        { transformOrigin: 'top left', transform, opacity: opacity[0] },
+        { transformOrigin: 'top left', transform: 'none', opacity: opacity[1] },
+      ],
+      { duration: 360, delay, easing: 'cubic-bezier(.2, .75, .25, 1)', fill: 'both' },
+    );
+    return animation.finished.then(() => animation.cancel()).catch(() => undefined);
+  };
 
-    if (group.expanded) {
-      collapseGroup(groupId);
-      return;
-    }
-
-    setItems((current) => {
-      const currentGroup = current.find((item): item is GroupCanvasItem => item.id === groupId && item.type === 'group');
-      if (!currentGroup) {
-        return current;
-      }
-
-      const expandedGroup = { ...currentGroup, expanded: true };
-      const children = current
-        .filter((item) => expandedGroup.childIds.includes(item.id))
-        .map(restoreGroupStackChild);
-      const positions = getGroupExpandedPositions(expandedGroup, children);
-
-      return current.map((item) => {
-        if (item.id === groupId) {
-          return expandedGroup;
-        }
-
-        const position = positions.get(item.id);
-        const expandedChild = children.find((child) => child.id === item.id);
-        return position ? { ...item, ...(expandedChild ?? {}), ...position } : item;
+  const animateLayoutChange = (previousRects: Map<string, DOMRect>, coordinateScale = 1) => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        const elements = getCanvasItemElements();
+        const currentRects = getCanvasItemRects();
+        const animations: Promise<void>[] = [];
+        previousRects.forEach((previous, id) => {
+          const element = elements.get(id);
+          const current = currentRects.get(id);
+          if (!element || !current) return;
+          if (Math.abs(previous.left - current.left) < 1 && Math.abs(previous.top - current.top) < 1 &&
+              Math.abs(previous.width - current.width) < 1 && Math.abs(previous.height - current.height) < 1) return;
+          animations.push(animateBetweenRects(element, previous, current, [1, 1], 0, coordinateScale));
+        });
+        void Promise.all(animations).then(() => resolve());
       });
     });
   };
 
-  const collapseGroup = (groupId: string) => {
-    setItems((current) => {
-      const group = current.find((item) => item.id === groupId && item.type === 'group') as GroupCanvasItem | undefined;
-      if (!group) {
-        return current;
-      }
+  const getFolderStackRect = (folder: FolderCanvasItem, index: number) => {
+    const element = getCanvasItemElements().get(folder.id);
+    const bounds = element?.getBoundingClientRect();
+    if (!bounds) return null;
+    const width = bounds.width * 0.42;
+    const height = bounds.height * 0.3;
+    const offset = Math.min(index, 5) * 2;
+    return new DOMRect(
+      bounds.left + (bounds.width - width) / 2 + offset,
+      bounds.top + bounds.height * 0.34 + offset,
+      width,
+      height,
+    );
+  };
 
-      const collapsedGroup = { ...group, expanded: false };
-      const children = current
-        .filter((item) => collapsedGroup.childIds.includes(item.id))
-        .map(restoreGroupStackChild)
-        .map(getGroupStackChild);
-      const positions = getGroupCollapsedPositions(collapsedGroup, children);
-
-      return current.map((item) => {
-        if (item.id === groupId) {
-          return collapsedGroup;
-        }
-
-        const position = positions.get(item.id);
-        const collapsedChild = children.find((child) => child.id === item.id);
-        return position ? { ...item, ...(collapsedChild ?? {}), ...position } : item;
-      });
+  const settleFolderChildren = (folder: FolderCanvasItem) => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      const elements = getCanvasItemElements();
+      folder.childIds.forEach((id) => elements.get(id)?.getAnimations().forEach((animation) => animation.cancel()));
+      resolve();
     });
+  });
+
+  const animateFolderChildren = async (folder: FolderCanvasItem, opening: boolean) => {
+    const elements = getCanvasItemElements();
+    const folderElement = elements.get(folder.id);
+    const folderBounds = folderElement?.getBoundingClientRect();
+    if (!folderBounds) return;
+    const children = folder.childIds
+      .map((id, index) => ({ element: elements.get(id), stack: getFolderStackRect(folder, index), index }))
+      .filter((entry): entry is { element: HTMLElement; stack: DOMRect; index: number } => Boolean(entry.element && entry.stack));
+
+    if (opening) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const destinationElements = getCanvasItemElements();
+      const animations = children.flatMap(({ index, stack }) => {
+        const element = destinationElements.get(folder.childIds[index]);
+        const destination = element?.getBoundingClientRect();
+        return element && destination ? [animateBetweenRects(element, stack, destination, [0.45, 1], index * 24, zoom)] : [];
+      });
+      await Promise.all(animations);
+      return;
+    }
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const animations = children.map(({ element, stack, index }) => {
+      const current = element.getBoundingClientRect();
+      if (current.width <= 0 || current.height <= 0) return null;
+      const coordinateScale = Math.max(0.01, zoom);
+      const transform = `translate(${(stack.left - current.left) / coordinateScale}px, ${(stack.top - current.top) / coordinateScale}px) scale(${stack.width / current.width}, ${stack.height / current.height})`;
+      return element.animate(
+        [
+          { transformOrigin: 'top left', transform: 'none', opacity: 1 },
+          { transformOrigin: 'top left', transform, opacity: 0.4 },
+        ],
+        { duration: 360, delay: index * 18, easing: 'cubic-bezier(.2, .75, .25, 1)', fill: 'both' },
+      );
+    }).filter((animation): animation is Animation => animation !== null);
+    await Promise.all(animations.map((animation) => animation.finished.catch(() => undefined)));
   };
 
   const collapseAllGroups = () => {
-    setItems((current) => {
-      const next = current.map((item) => {
-        if ((item.type === 'group' || item.type === 'folder') && item.expanded) {
-          return { ...item, expanded: false };
-        }
+    if (containerAnimationLockRef.current) return;
+    const expandedFolders = items.filter((item): item is FolderCanvasItem => item.type === 'folder' && item.expanded);
+    const expandedContainers = items.some((item) => (item.type === 'group' || item.type === 'folder') && item.expanded);
+    if (!expandedContainers) return;
 
-        return item;
-      });
-      return repositionContainerChildren(next);
-    });
+    containerAnimationLockRef.current = true;
+    void (async () => {
+      try {
+        const previousRects = getCanvasItemRects();
+        await Promise.all(expandedFolders.map((folder) => animateFolderChildren(folder, false)));
+        setItems((current) => repositionContainerChildren(current.map((item) =>
+          (item.type === 'group' || item.type === 'folder') && item.expanded ? { ...item, expanded: false } : item,
+        )));
+        await Promise.all([
+          animateLayoutChange(previousRects, zoom),
+          ...expandedFolders.map(settleFolderChildren),
+        ]);
+      } finally {
+        containerAnimationLockRef.current = false;
+      }
+    })();
   };
 
   const removeItem = (id: string) => {
@@ -1925,28 +2094,47 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
     });
   }, [handlePageCommit, items, pageLoadingIds]);
   const toggleContainer = (id: string) => {
-    setItems((current) => {
-      const container = current.find(
-        (item): item is GroupCanvasItem | FolderCanvasItem =>
-          item.id === id && (item.type === 'group' || item.type === 'folder'),
-      );
-      if (!container) {
-        return current;
-      }
+    if (containerAnimationLockRef.current) return;
+    const container = items.find(
+      (item): item is GroupCanvasItem | FolderCanvasItem =>
+        item.id === id && (item.type === 'group' || item.type === 'folder'),
+    );
+    if (!container) return;
 
-      const expanded = !container.expanded;
-      const updatedContainer = { ...container, expanded };
-
-      if (container.type !== 'folder') {
-        return current.map((item) => (item.id === id ? updatedContainer : item));
+    containerAnimationLockRef.current = true;
+    void (async () => {
+      try {
+        if (container.type === 'folder') {
+          if (container.expanded) {
+            await animateFolderChildren(container, false);
+            setItems((current) => repositionContainerChildren(current.map((item) =>
+              item.id === id && item.type === 'folder' ? { ...item, expanded: false } : item,
+            )));
+            await settleFolderChildren(container);
+          } else {
+            const otherOpenFolders = items.filter(
+              (item): item is FolderCanvasItem => item.type === 'folder' && item.expanded && item.id !== id,
+            );
+            await Promise.all(otherOpenFolders.map((folder) => animateFolderChildren(folder, false)));
+            setItems((current) => repositionContainerChildren(current.map((item) => {
+              if (item.type !== 'folder') return item;
+              if (item.id === id) return { ...item, expanded: true };
+              return item.expanded ? { ...item, expanded: false } : item;
+            })));
+            await Promise.all(otherOpenFolders.map(settleFolderChildren));
+            await animateFolderChildren({ ...container, expanded: true }, true);
+          }
+        } else {
+          const previousRects = getCanvasItemRects();
+          setItems((current) => repositionContainerChildren(current.map((item) =>
+            item.id === id && item.type === 'group' ? { ...item, expanded: !item.expanded } : item,
+          )));
+          await animateLayoutChange(previousRects, zoom);
+        }
+      } finally {
+        containerAnimationLockRef.current = false;
       }
-      const next = current.map((item) => {
-        if (item.type !== 'folder') return item;
-        if (item.id === id) return { ...item, expanded };
-        return expanded && item.expanded ? { ...item, expanded: false } : item;
-      });
-      return repositionContainerChildren(next);
-    });
+    })();
   };
 
   const renderFolderLabel = (item: FolderCanvasItem) => {
@@ -2257,11 +2445,7 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
     );
   };
 
-  const visibleItems = items.filter(
-    (item) =>
-      item.type !== 'group' &&
-      !items.some((entry) => entry.type === 'folder' && !entry.expanded && entry.childIds.includes(item.id)),
-  );
+  const visibleItems = items.filter((item) => item.type !== 'group');
   const contextMenuItem = contextMenu ? items.find((item) => item.id === contextMenu.id) : undefined;
 
   return (
@@ -2362,6 +2546,7 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
           );
         }}
         onReorder={reorderLayers}
+        onToggleContainer={toggleContainer}
         onMoveSelected={moveSelectedLayer}
         onDeleteSelected={() => {
           if (selectedIds.length === 0) {
@@ -2486,25 +2671,26 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
           {visibleItems.map((item) => {
             const parentFolder = items.find(
               (entry): entry is FolderCanvasItem =>
-                entry.type === 'folder' && entry.expanded && entry.childIds.includes(item.id),
+                entry.type === 'folder' && entry.childIds.includes(item.id),
             );
             const parentGroup = items.find(
               (entry): entry is GroupCanvasItem => entry.type === 'group' && entry.childIds.includes(item.id),
             );
-            const isFolderPreview = Boolean(parentFolder);
+            const isFolderPreview = Boolean(parentFolder?.expanded);
+            const isFolderCollapsedChild = Boolean(parentFolder && !parentFolder.expanded);
             const isGroupStackChild = Boolean(parentGroup && !parentGroup.expanded);
 
             return (
               <div
                 key={item.id}
                 data-item-id={item.id}
-                className={`canvas-item ${selectedIds.includes(item.id) ? 'selected' : ''} ${isContainerItem(item) ? 'canvas-container' : ''} ${item.type === 'folder' ? 'folder-item' : ''} ${item.type === 'page' ? 'page-item' : ''} ${item.type === 'file' && item.mimeType.startsWith('image/') ? 'image-item' : ''} ${isFolderPreview ? 'folder-expanded-child' : ''} ${isGroupStackChild ? 'group-stack-child' : ''}`}
+                className={`canvas-item ${selectedIds.includes(item.id) ? 'selected' : ''} ${isContainerItem(item) ? 'canvas-container' : ''} ${item.type === 'folder' ? 'folder-item' : ''} ${item.type === 'page' ? 'page-item' : ''} ${item.type === 'file' && item.mimeType.startsWith('image/') ? 'image-item' : ''} ${isFolderPreview ? 'folder-expanded-child' : ''} ${isFolderCollapsedChild ? 'folder-collapsed-child' : ''} ${isGroupStackChild ? 'group-stack-child' : ''}`}
                 style={{
                   left: item.x,
                   top: item.y,
                   width: isFolderPreview ? 150 : item.type === 'page' ? getPageImageWidth(item) : item.width,
                   height: isFolderPreview ? 96 : item.type === 'page' ? item.visibleHeight || item.height : item.height,
-                  zIndex: isFolderPreview ? 4 : undefined,
+                  zIndex: item.type === 'folder' && item.expanded ? 5 : isFolderPreview ? 4 : undefined,
                 }}
                 onMouseDown={(event) => {
                   const parentGroup = items.find(
@@ -2515,12 +2701,6 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
                     updateSelection([item.id]);
                     setContextMenu(null);
                     startItemDrag(event, item.id);
-                    return;
-                  }
-
-                  if (isContainerItem(item)) {
-                    updateSelection([item.id]);
-                    setContextMenu(null);
                     return;
                   }
 
@@ -2575,13 +2755,6 @@ export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot,
                   if (parentFolder) {
                     event.preventDefault();
                     event.stopPropagation();
-                    return;
-                  }
-
-                  if (item.type === 'group') {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    toggleContainer(item.id);
                     return;
                   }
 

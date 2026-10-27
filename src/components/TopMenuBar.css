@@ -9,7 +9,8 @@
 }
 
 /* --- GRUPO DE SALIDA (Mismo contenedor que .top-bar-group) --- */
-.top-bar-exit-group {
+.top-bar-exit-group,
+.top-bar-history-group {
   background-color: rgba(23, 23, 23, 0.8);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -21,8 +22,16 @@
   align-items: center;
 }
 
+.top-bar-history-group {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  gap: 2px;
+}
+
 /* Botón de salida interno (Mismo estilo que .top-bar-btn) */
-.top-bar-exit-btn {
+.top-bar-exit-btn,
+.top-bar-history-btn {
   background: transparent;
   border: none;
   color: #a3a3a3;
@@ -36,9 +45,15 @@
   transition: background-color 0.2s, color 0.2s;
 }
 
-.top-bar-exit-btn:hover {
+.top-bar-exit-btn:hover,
+.top-bar-history-btn:not(:disabled):hover {
   background-color: rgba(255, 255, 255, 0.1);
   color: #ffffff;
+}
+
+.top-bar-history-btn:disabled {
+  color: #525252;
+  cursor: default;
 }
 
 /* --- GRUPO DERECHO --- */

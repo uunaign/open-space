@@ -1,4 +1,5 @@
-import { ArrowLeft, Save, Settings2, Triangle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ArrowLeft, Redo2, Save, Settings2, Triangle, Undo2 } from 'lucide-react';
 import './TopMenuBar.css';
 
 interface TopMenuBarProps {
@@ -6,6 +7,16 @@ interface TopMenuBarProps {
 }
 
 export const TopMenuBar = ({ onHome }: TopMenuBarProps) => {
+  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+
+  useEffect(() => {
+    const updateHistoryState = (event: Event) => {
+      setHistoryState((event as CustomEvent<{ canUndo: boolean; canRedo: boolean }>).detail);
+    };
+    window.addEventListener('canvas-history-state', updateHistoryState);
+    return () => window.removeEventListener('canvas-history-state', updateHistoryState);
+  }, []);
+
   const handleCenterView = () => {
     window.dispatchEvent(new CustomEvent('canvas-center-view'));
   };
@@ -54,6 +65,29 @@ export const TopMenuBar = ({ onHome }: TopMenuBarProps) => {
           aria-label="Guardar canvas"
         >
           <Save size={18} />
+        </button>
+      </div>
+
+      <div className="top-bar-history-group" role="group" aria-label="Historial del canvas">
+        <button
+          type="button"
+          className="top-bar-history-btn"
+          title="Deshacer (Ctrl+Z)"
+          aria-label="Deshacer"
+          disabled={!historyState.canUndo}
+          onClick={() => window.dispatchEvent(new CustomEvent('canvas-undo'))}
+        >
+          <Undo2 size={18} />
+        </button>
+        <button
+          type="button"
+          className="top-bar-history-btn"
+          title="Rehacer (Ctrl+Mayús+Z)"
+          aria-label="Rehacer"
+          disabled={!historyState.canRedo}
+          onClick={() => window.dispatchEvent(new CustomEvent('canvas-redo'))}
+        >
+          <Redo2 size={18} />
         </button>
       </div>
     </div>
