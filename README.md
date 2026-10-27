@@ -61,6 +61,17 @@ Para crear los instaladores de escritorio:
 npm run tauri build
 ```
 
+## Builds y releases en GitHub
+
+GitHub Actions valida el build del frontend al abrir o actualizar un *pull request* hacia `main`, y en cada *push* a esa rama. Para publicar una versión, actualiza la versión de la app en `package.json`, `src-tauri/tauri.conf.json` y `src-tauri/Cargo.toml`, crea un tag que coincida con ella (por ejemplo, `v0.1.0`) y súbelo:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+El workflow compila instaladores para Windows x64, Linux x64, macOS Apple Silicon e Intel, y crea un borrador de Release con notas generadas. Revisa los instaladores y las notas en **GitHub → Releases** y publícalo cuando esté listo. No hace falta crear un `GITHUB_TOKEN` manual: Actions usa el token del repositorio con permiso para publicar Releases. Si la política del repositorio restringe ese permiso, habilita **Settings → Actions → General → Workflow permissions → Read and write permissions**.
+
 La captura de páginas web requiere un navegador Chromium disponible. Si no tienes Chrome o Edge instalados, instala Chromium para Playwright:
 
 ```bash

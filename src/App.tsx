@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { FileText, MoreHorizontal, Plus, FolderSearch, Pencil, Copy, Trash2, X } from 'lucide-react';
@@ -99,6 +99,7 @@ const formatDate = (date: string) => {
 export function App() {
   const [documents, setDocuments] = useState<CanvasDocument[]>([]);
   const [activeDocument, setActiveDocument] = useState<CanvasDocument | null>(null);
+  const activeDocumentRef = useRef<CanvasDocument | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -145,6 +146,7 @@ export function App() {
     try {
       await putDocument(document);
       setDocuments((current) => [document, ...current]);
+      activeDocumentRef.current = document;
       setActiveDocument(document);
       setErrorMessage('');
     } catch (error) {
@@ -154,29 +156,42 @@ export function App() {
   }, []);
 
   const saveCanvas = useCallback(async (snapshot: CanvasSnapshot) => {
-    if (!activeDocument) {
+    const currentDocument = activeDocumentRef.current;
+    if (!currentDocument) {
       throw new Error('No hay ningún canvas abierto para guardar.');
     }
 
     const updatedDocument = {
-      ...activeDocument,
+      ...currentDocument,
       snapshot,
       updatedAt: new Date().toISOString(),
     };
 
     await putDocument(updatedDocument);
+    activeDocumentRef.current = updatedDocument;
     setDocuments((current) =>
       [updatedDocument, ...current.filter((document) => document.id !== updatedDocument.id)]
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     );
     setActiveDocument((current) => current?.id === updatedDocument.id ? updatedDocument : current);
     setErrorMessage('');
+  }, []);
+
+  const renameActiveCanvas = useCallback(async (title: string) => {
+    if (!activeDocument) return;
+    const renamed = { ...activeDocument, title, updatedAt: new Date().toISOString() };
+    await putDocument(renamed);
+    activeDocumentRef.current = renamed;
+    setDocuments((current) => [renamed, ...current.filter((document) => document.id !== renamed.id)]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    setActiveDocument(renamed);
   }, [activeDocument]);
 
   const returnToHome = () => {
     if (activeDocument) {
       window.dispatchEvent(new CustomEvent('canvas-save'));
     }
+    activeDocumentRef.current = null;
     setActiveDocument(null);
   };
 
@@ -342,6 +357,7 @@ export function App() {
                       className="canvas-card"
                       type="button"
                       onClick={() => {
+                        activeDocumentRef.current = document;
                         setActiveDocument(document);
                         setErrorMessage('');
                       }}
@@ -397,6 +413,9 @@ export function App() {
     <div className="app-shell">
       <Canvas
         key={activeDocument.id}
+        canvasId={activeDocument.id}
+        canvasTitle={activeDocument.title}
+        onRenameCanvas={renameActiveCanvas}
         initialSnapshot={activeDocument.snapshot}
         onSave={saveCanvas}
       />

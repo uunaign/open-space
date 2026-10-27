@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Maximize, Minimize } from 'lucide-react';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { FolderOpen, Maximize, Minimize } from 'lucide-react';
 import folderFrontSvg from '../assets/Carpeta_delantera.svg?raw';
 import folderBackSvg from '../assets/Carpeta_trasera.svg?raw';
 import { LayerBar } from './LayerBar';
@@ -311,6 +312,9 @@ export interface CanvasSnapshot {
 }
 
 interface CanvasProps {
+  canvasId: string;
+  canvasTitle: string;
+  onRenameCanvas: (title: string) => Promise<void>;
   initialSnapshot?: CanvasSnapshot;
   onSave: (snapshot: CanvasSnapshot) => Promise<void>;
 }
@@ -552,7 +556,7 @@ const makeId = () => {
   return `item-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
-export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
+export const Canvas = ({ canvasId, canvasTitle, onRenameCanvas, initialSnapshot, onSave }: CanvasProps) => {
   const [pan, setPan] = useState<PanState>(initialSnapshot?.pan ?? { x: 0, y: 0 });
   const [zoom, setZoom] = useState(initialSnapshot?.zoom ?? 1);
   const [isDragging, setIsDragging] = useState(false);
@@ -569,6 +573,8 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
   const [pageLoadingIds, setPageLoadingIds] = useState<Record<string, boolean>>({});
   const [pageCaptureErrors, setPageCaptureErrors] = useState<Record<string, string>>({});
   const [canvasSettingsOpen, setCanvasSettingsOpen] = useState(false);
+  const [canvasTitleDraft, setCanvasTitleDraft] = useState(canvasTitle);
+  const [canvasSettingsPosition, setCanvasSettingsPosition] = useState({ left: 80, top: 76 });
   const [fileSettingsOpen, setFileSettingsOpen] = useState(false);
   const [layerBarOpen, setLayerBarOpen] = useState(false);
   const [canvasBackground, setCanvasBackground] = useState(initialSnapshot?.canvasBackground ?? '#ffffff');
@@ -591,33 +597,26 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
     reader.readAsDataURL(file);
   });
 
-  const saveCanvasProject = () => {
-    const snapshot: CanvasSnapshot = {
-      version: 1,
-      savedAt: new Date().toISOString(),
-      pan: panRef.current,
-      zoom: zoomRef.current,
-      canvasBackground,
-      canvasGridEnabled,
-      items,
-    };
+  const createCanvasSnapshot = (overrides: Partial<CanvasSnapshot> = {}): CanvasSnapshot => ({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    pan: panRef.current,
+    zoom: zoomRef.current,
+    canvasBackground,
+    canvasGridEnabled,
+    items,
+    ...overrides,
+  });
 
-    void onSave(snapshot).catch((error: unknown) => {
+  const saveCanvasProject = () => {
+    void onSave(createCanvasSnapshot()).catch((error: unknown) => {
       console.error('No se pudo guardar el canvas:', error);
       window.alert('No se pudo guardar el canvas en este dispositivo.');
     });
   };
 
   const exportCanvasProject = () => {
-    const snapshot: CanvasSnapshot = {
-      version: 1,
-      savedAt: new Date().toISOString(),
-      pan: panRef.current,
-      zoom: zoomRef.current,
-      canvasBackground,
-      canvasGridEnabled,
-      items,
-    };
+    const snapshot = createCanvasSnapshot();
     const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -627,6 +626,46 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const commitCanvasTitle = async () => {
+    const title = canvasTitleDraft.trim();
+    if (!title) {
+      setCanvasTitleDraft(canvasTitle);
+      return;
+    }
+    if (title === canvasTitle) return;
+    try {
+      await onRenameCanvas(title);
+    } catch (error) {
+      console.error('No se pudo cambiar el nombre del canvas:', error);
+      setCanvasTitleDraft(canvasTitle);
+    }
+  };
+
+  const setCanvasMode = async (mode: 'light' | 'dark') => {
+    const nextBackground = mode === 'light' ? '#ffffff' : '#202124';
+    if (canvasBackground.toLowerCase() === nextBackground) return;
+    setCanvasBackground(nextBackground);
+    try {
+      await onSave(createCanvasSnapshot({ canvasBackground: nextBackground }));
+    } catch (error) {
+      console.error('No se pudo cambiar el fondo del canvas:', error);
+      window.alert('No se pudo guardar el fondo del canvas.');
+    }
+  };
+
+  const showCanvasFileInExplorer = async () => {
+    try {
+      const path = await invoke<string>('reveal_canvas_file', {
+        id: canvasId,
+        contents: JSON.stringify(createCanvasSnapshot(), null, 2),
+      });
+      await revealItemInDir(path);
+    } catch (error) {
+      console.error('No se pudo mostrar la copia local:', error);
+      window.alert('No se pudo abrir la copia local en el explorador.');
+    }
   };
 
   const loadCanvasProject = async (file: File) => {
@@ -770,6 +809,7 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
 
       if (event.key === 'Escape') {
         if (fullscreenNoteId) setFullscreenNoteClosing(true);
+        setCanvasSettingsOpen(false);
         setContextMenu(null);
         setEditingId(null);
         collapseAllGroups();
@@ -843,8 +883,16 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
       setFileSettingsOpen(true);
     };
 
-    const openCanvasSettings = () => {
-      setCanvasSettingsOpen(true);
+    const openCanvasSettings = (event: Event) => {
+      const detail = (event as CustomEvent<{ left: number; bottom: number }>).detail;
+      if (detail) {
+        setCanvasSettingsPosition({
+          left: Math.max(12, Math.min(detail.left, window.innerWidth - 452)),
+          top: detail.bottom + 8,
+        });
+      }
+      setCanvasTitleDraft(canvasTitle);
+      setCanvasSettingsOpen((open) => !open);
     };
 
     const openProjectImport = () => {
@@ -944,7 +992,23 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
       window.removeEventListener('canvas-open-project', openProjectImport);
       window.removeEventListener('canvas-save', saveCanvasProject);
     };
-  }, [canvasBackground, canvasGridEnabled, fullscreenNoteId, initialSnapshot, items, onSave, selectedId, selectedIds]);
+  }, [canvasBackground, canvasGridEnabled, canvasTitle, fullscreenNoteId, initialSnapshot, items, onSave, selectedId, selectedIds]);
+
+  useEffect(() => {
+    if (!canvasSettingsOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('.canvas-settings-popover, .top-bar-settings-btn')) return;
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLInputElement && activeElement.classList.contains('canvas-settings-title-input')) {
+        activeElement.blur();
+      }
+      setCanvasSettingsOpen(false);
+    };
+    window.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    return () => window.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+  }, [canvasSettingsOpen]);
 
   const getViewportCenterPosition = (width: number, height: number) => {
     const viewport = viewportRef.current;
@@ -2204,6 +2268,7 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
     <div
       ref={viewportRef}
       className={`canvas-shell ${isDragging ? 'dragging' : ''}`}
+      style={{ background: canvasBackground, '--canvas-bg': canvasBackground } as React.CSSProperties}
       onMouseDown={beginPan}
       onMouseMove={handleMouseMove}
       onMouseUp={(event) => stopInteraction(event)}
@@ -2312,30 +2377,38 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
       />
 
       {canvasSettingsOpen && (
-        <div className="canvas-settings-panel">
-          <div className="canvas-settings-header">
-            <strong>Configuración del canvas</strong>
-            <button type="button" onClick={() => setCanvasSettingsOpen(false)}>Cerrar</button>
-          </div>
+        <section className="canvas-settings-popover canvas-settings-modal" style={{ left: canvasSettingsPosition.left, top: canvasSettingsPosition.top }} role="dialog" aria-modal="false" aria-labelledby="canvas-settings-title" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+            <header className="canvas-settings-modal-header">
+              <h2 id="canvas-settings-title">Configuración</h2>
+            </header>
 
-          <label>
-            <span>Fondo</span>
-            <input
-              type="color"
-              value={canvasBackground}
-              onChange={(event) => setCanvasBackground(event.target.value)}
-            />
-          </label>
-
-          <label className="canvas-settings-toggle">
-            <input
-              type="checkbox"
-              checked={canvasGridEnabled}
-              onChange={(event) => setCanvasGridEnabled(event.target.checked)}
-            />
-            <span>Mostrar cuadrícula</span>
-          </label>
-        </div>
+            <div className="canvas-settings-section canvas-settings-compact-content">
+              <label className="canvas-settings-name">
+                <span>Nombre del archivo</span>
+                <input
+                  className="canvas-settings-title-input"
+                  autoFocus
+                  value={canvasTitleDraft}
+                  maxLength={80}
+                  onChange={(event) => setCanvasTitleDraft(event.target.value)}
+                  onBlur={() => void commitCanvasTitle()}
+                  onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } }}
+                  placeholder="Canvas sin título"
+                />
+              </label>
+              <div className="canvas-settings-location">
+                <div><span>Se guarda en</span><strong>Este dispositivo · Open Space</strong></div>
+                <button type="button" title="Mostrar copia local en el explorador" aria-label="Mostrar copia local en el explorador" onClick={() => void showCanvasFileInExplorer()}><FolderOpen size={17} /></button>
+              </div>
+              <div className="canvas-settings-mode-row">
+                <span>Fondo del canvas</span>
+                <div className="canvas-settings-mode-switch" role="group" aria-label="Modo de fondo">
+                  <button type="button" className={canvasBackground.toLowerCase() === '#ffffff' ? 'active' : ''} aria-pressed={canvasBackground.toLowerCase() === '#ffffff'} onClick={() => void setCanvasMode('light')}>Claro</button>
+                  <button type="button" className={canvasBackground.toLowerCase() === '#202124' ? 'active' : ''} aria-pressed={canvasBackground.toLowerCase() === '#202124'} onClick={() => void setCanvasMode('dark')}>Oscuro</button>
+                </div>
+              </div>
+            </div>
+        </section>
       )}
 
       {fileSettingsOpen && (
@@ -2407,7 +2480,6 @@ export const Canvas = ({ initialSnapshot, onSave }: CanvasProps) => {
         style={{
           background: canvasBackground,
           transform: `translate(${pan.x}px, ${pan.y}px)`,
-          boxShadow: canvasGridEnabled ? 'inset 0 0 0 1px rgba(15, 23, 42, 0.04)' : 'none',
         }}
       >
         <div className="canvas-content" style={{ zoom }}>

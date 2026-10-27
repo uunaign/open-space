@@ -25,10 +25,15 @@ export const TopMenuBar = ({ onHome }: TopMenuBarProps) => {
 
       <div className="top-bar-group">
         <button
-          className="top-bar-btn top-bar-center-btn"
-          title="Centrar y encuadrar todo (Ctrl+Mayús+F)"
-          onClick={handleCenterView}
-          aria-label="Centrar vista"
+          className="top-bar-btn top-bar-center-btn top-bar-settings-btn"
+          title="Configuración del canvas"
+          onClick={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            window.dispatchEvent(new CustomEvent('canvas-open-canvas-settings', {
+              detail: { left: bounds.left, bottom: bounds.bottom },
+            }));
+          }}
+          aria-label="Abrir configuración"
         >
           <Settings2 size={16} />
         </button>
